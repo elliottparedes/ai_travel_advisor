@@ -37,14 +37,14 @@ async function handleSubmit() {
     }
     try {
       await auth.signUp(username.value, password.value, displayName.value || undefined);
-      router.push("/flights");
+      router.push("/trips");
     } catch {
       // error already set in store
     }
   } else {
     try {
       await auth.signIn(username.value, password.value);
-      router.push("/flights");
+      router.push("/trips");
     } catch {
       // error already set in store
     }

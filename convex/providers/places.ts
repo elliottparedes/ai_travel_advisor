@@ -171,10 +171,12 @@ function elementToRawPlace(el: any, type: PlaceType): RawPlace | null {
     tags: extraTags.slice(0, 4),
     cuisine: tags.cuisine?.replace(/_/g, " "),
     category:
-      tags.tourism?.replace(/_/g, " ") ||
-      tags.historic?.replace(/_/g, " ") ||
-      tags.amenity?.replace(/_/g, " ") ||
-      undefined,
+      type === "nightlife"
+        ? undefined
+        : (tags.tourism?.replace(/_/g, " ") ||
+           tags.historic?.replace(/_/g, " ") ||
+           tags.amenity?.replace(/_/g, " ") ||
+           undefined),
     vibe: type === "nightlife" ? (NIGHTLIFE_VIBE[tags.amenity ?? ""] ?? "bar") : undefined,
   };
 }
