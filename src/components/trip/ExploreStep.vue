@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { useTripStore } from "../../stores/tripStore";
+import { useListStore } from "../../stores/listStore";
+import { useAuthStore } from "../../stores/authStore";
 import { CARD_FILTERS } from "../../types/trips";
 import type { DiscoveryCard as DiscoveryCardType, PlaceDetails } from "../../types/trips";
 import * as tripsApi from "../../api/tripsApi";
@@ -10,6 +12,8 @@ import PlaceDetailPanel from "./PlaceDetailPanel.vue";
 import TripMap from "./TripMap.vue";
 
 const store = useTripStore();
+const listStore = useListStore();
+const auth = useAuthStore();
 
 // ── Infinite scroll via IntersectionObserver ─────────────────────────────────
 const sentinel = ref<HTMLElement | null>(null);
@@ -25,6 +29,9 @@ onMounted(() => {
     { rootMargin: "300px" },
   );
   if (sentinel.value) observer.observe(sentinel.value);
+
+  // Load list store non-blocking for card highlighting
+  if (auth.sessionToken) void listStore.load(auth.sessionToken);
 });
 
 onUnmounted(() => observer?.disconnect());
@@ -147,6 +154,7 @@ async function openCard(card: DiscoveryCardType) {
           :key="card.id"
           :card="card"
           :pinned="store.pinnedIds.has(card.id)"
+          :listed="!!card.fsqId && listStore.listedFsqIds.has(card.fsqId)"
           @toggle-pin="store.togglePin"
           @select="openCard(card)"
         />
@@ -173,6 +181,8 @@ async function openCard(card: DiscoveryCardType) {
       :details="placeDetails"
       :is-loading="isLoadingDetails"
       :pinned="store.pinnedIds.has(selectedCard.id)"
+      :city="store.destinationInfo?.city ?? ''"
+      :country="store.destinationInfo?.country ?? ''"
       @close="selectedCard = null"
       @toggle-pin="store.togglePin"
     />

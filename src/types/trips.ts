@@ -53,6 +53,17 @@ export interface PlaceDetails {
   tel?: string;
 }
 
+export interface Review {
+  _id: string;
+  userId: string;
+  displayName: string;
+  vibe: number;
+  text: string;
+  helpfulCount: number;
+  helpfulVoterIds: string[];
+  createdAt: number;
+}
+
 export const CARD_FILTERS: { key: CardType; label: string; emoji: string }[] = [
   { key: "restaurant",    label: "Restaurants",   emoji: "🍽" },
   { key: "coffee",        label: "Coffee & Cafés", emoji: "☕" },

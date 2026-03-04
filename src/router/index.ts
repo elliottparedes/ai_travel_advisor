@@ -29,6 +29,16 @@ const router = createRouter({
       component: () => import("../views/TripWizard.vue"),
       meta: { requiresAuth: true },
     },
+    {
+      path: "/lists",
+      component: () => import("../views/ListsView.vue"),
+      meta: { requiresAuth: true },
+    },
+    {
+      path: "/reviews",
+      component: () => import("../views/ReviewsView.vue"),
+      meta: { requiresAuth: true },
+    },
     { path: "/:pathMatch(.*)*", redirect: "/" },
   ],
 });

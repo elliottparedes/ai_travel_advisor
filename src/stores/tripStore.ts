@@ -6,6 +6,22 @@ import { useAuthStore } from "./authStore";
 
 const PAGE_SIZE = 24;
 
+const TYPE_LABEL: Record<string, string> = {
+  restaurant: "restaurant", coffee: "coffee shop", hotel: "hotel",
+  landmark: "attraction", nightlife: "bar", outdoor: "park",
+  shopping: "store", entertainment: "venue",
+};
+
+function buildImageQuery(card: DiscoveryCard, city: string): string {
+  const parts = [card.title];
+  if (card.cuisine) parts.push(card.cuisine);
+  else if (card.category) parts.push(card.category);
+  else parts.push(TYPE_LABEL[card.type] ?? card.type);
+  if (card.neighborhood) parts.push(card.neighborhood);
+  parts.push(city);
+  return parts.join(" ");
+}
+
 export const useTripStore = defineStore("trip", () => {
   // ── Wizard navigation ──────────────────────────────────────────────────────
   const step = ref<1 | 2 | 3>(1);
@@ -119,7 +135,7 @@ export const useTripStore = defineStore("trip", () => {
     if (fetchedCards.length === 0 || !destinationInfo.value?.city) return;
     const city = destinationInfo.value.city;
     const BATCH = 8;
-    const queries = fetchedCards.map(c => ({ id: c.id, query: `${c.title} ${city}`, fsqId: c.fsqId }));
+    const queries = fetchedCards.map(c => ({ id: c.id, query: buildImageQuery(c, city), fsqId: c.fsqId }));
     const batches: { id: string; query: string; fsqId?: string }[][] = [];
     for (let i = 0; i < queries.length; i += BATCH) batches.push(queries.slice(i, i + BATCH));
 
@@ -182,7 +198,7 @@ export const useTripStore = defineStore("trip", () => {
       // Load images in parallel batches
       if (more.length > 0) {
         const BATCH = 8;
-        const queries = more.map(c => ({ id: c.id, query: `${c.title} ${city}`, fsqId: c.fsqId }));
+        const queries = more.map(c => ({ id: c.id, query: buildImageQuery(c, city), fsqId: c.fsqId }));
         const batches: { id: string; query: string; fsqId?: string }[][] = [];
         for (let i = 0; i < queries.length; i += BATCH) batches.push(queries.slice(i, i + BATCH));
         const imageMaps = await Promise.all(

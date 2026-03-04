@@ -85,4 +85,44 @@ export default defineSchema({
     itinerary: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_user", ["userId"]),
+
+  userLists: defineTable({
+    userId: v.id("users"),
+    name: v.string(),
+    emoji: v.string(),
+    items: v.array(v.object({
+      fsqId:          v.optional(v.string()),
+      title:          v.string(),
+      type:           v.string(),
+      city:           v.string(),
+      country:        v.string(),
+      image:          v.optional(v.string()),
+      imageFallbacks: v.optional(v.array(v.string())),
+      neighborhood:   v.optional(v.string()),
+      rating:         v.optional(v.float64()),
+      priceRange:     v.optional(v.string()),
+      lat:            v.optional(v.float64()),
+      lng:            v.optional(v.float64()),
+      addedAt:        v.float64(),
+    })),
+    createdAt: v.float64(),
+  }).index("by_user", ["userId"]),
+
+  reviews: defineTable({
+    userId:     v.id("users"),
+    username:   v.string(),
+    displayName: v.string(),
+    fsqId:      v.string(),
+    placeTitle: v.string(),
+    city:       v.string(),
+    country:    v.string(),
+    placeType:  v.string(),
+    vibe:       v.float64(),
+    text:       v.string(),
+    helpfulVoterIds: v.array(v.id("users")),
+    createdAt:  v.float64(),
+  })
+    .index("by_place",   ["fsqId"])
+    .index("by_city",    ["city"])
+    .index("by_user",    ["userId"]),
 });

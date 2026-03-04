@@ -6,6 +6,7 @@ import type { DiscoveryCard } from "../../types/trips";
 const props = defineProps<{
   card: DiscoveryCard;
   pinned: boolean;
+  listed?: boolean;
 }>();
 const emit = defineEmits<{ togglePin: [id: string]; select: [] }>();
 
@@ -48,6 +49,9 @@ function onImageError() {
       <svg v-else class="card-hero__icon" viewBox="0 0 24 24" fill="white">
         <path :d="iconPath(card.type)" />
       </svg>
+
+      <!-- Listed badge -->
+      <span v-if="listed" class="listed-badge" title="Saved to a list">🔖</span>
 
       <!-- Type chip -->
       <span class="type-chip">{{ card.type }}</span>
@@ -158,6 +162,18 @@ function onImageError() {
   width: 44px;
   height: 44px;
   opacity: 0.55;
+}
+
+.listed-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 0.75rem;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  border-radius: 999px;
+  padding: 2px 6px;
+  z-index: 2;
 }
 
 .type-chip {

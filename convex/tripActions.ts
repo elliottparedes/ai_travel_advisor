@@ -185,7 +185,7 @@ Return ONLY valid JSON (no markdown):
 // ── Image cache version ───────────────────────────────────────────────────────
 // Bump to invalidate all cached image URLs (e.g. after switching image providers).
 // Old entries with different prefix are silently ignored — no DB cleanup needed.
-const IMG_V = "v4:";
+const IMG_V = "v5:";
 
 // ── fetchCardImages ───────────────────────────────────────────────────────────
 // Returns a map of cardId → [url, fallback1, fallback2].
@@ -200,58 +200,83 @@ export const fetchCardImages = action({
     })),
   },
   handler: async (ctx, args): Promise<Record<string, string[]>> => {
-    // Deduplicate query strings before hitting cache or API
-    const uniqueQueries = [...new Set(args.queries.map(q => q.query))];
+    // Split into FSQ-backed (have fsqId) and DDG-only queries
+    const fsqItems  = args.queries.filter(q => q.fsqId);
+    const ddgItems  = args.queries.filter(q => !q.fsqId);
 
-    // Check cache — versioned keys so old provider URLs (e.g. Brave) are ignored.
-    // getImageCacheMany returns an array (not Record) to avoid non-ASCII field name errors.
-    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, {
-      queries: uniqueQueries.map(q => IMG_V + q),
-    });
-    // Build raw-query → urls map (strip version prefix)
+    // ── Cache keys ──
+    // FSQ items: "v4:fsq:<fsqId>", DDG items: "v4:<query>"
+    const allCacheKeys = [
+      ...fsqItems.map(q => `${IMG_V}fsq:${q.fsqId}`),
+      ...ddgItems.map(q => IMG_V + q.query),
+    ];
+    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, { queries: allCacheKeys });
     const cached: Record<string, string[]> = {};
-    for (const h of cachedArr) {
-      cached[h.query.slice(IMG_V.length)] = h.urls;
+    for (const h of cachedArr) cached[h.query.slice(IMG_V.length)] = h.urls;
+
+    const toCache: { query: string; urls: string[] }[] = [];
+    const freshMap: Record<string, string[]> = {};
+
+    // ── FSQ photos first (exact venue match, no guessing) ──
+    const fsqMisses = fsqItems.filter(q => !cached[`fsq:${q.fsqId}`]);
+    if (fsqMisses.length > 0) {
+      const results = await Promise.allSettled(
+        fsqMisses.map(async ({ fsqId, query }) => {
+          const photos = await placesProvider.getPhotos(fsqId!, 3).catch(() => [] as string[]);
+          return { key: `fsq:${fsqId}`, fallbackQuery: query, images: photos };
+        })
+      );
+      for (const r of results) {
+        if (r.status !== "fulfilled") continue;
+        const { key, fallbackQuery, images } = r.value;
+        if (images.length > 0) {
+          freshMap[key] = images;
+          toCache.push({ query: IMG_V + key, urls: images });
+        } else {
+          // FSQ returned no photos — fall through to DDG with this query
+          ddgItems.push({ id: fsqMisses.find(q => `fsq:${q.fsqId}` === key)!.id, query: fallbackQuery });
+        }
+      }
     }
 
-    // Fetch only cache misses — get 6 candidates per query, HEAD-verify, keep 3 working ones
-    const missQueries = uniqueQueries.filter(q => !cached[q]);
-    const freshMap: Record<string, string[]> = {};
-    if (missQueries.length > 0) {
+    // ── DDG fallback for items with no fsqId or no FSQ photos ──
+    const uniqueDdgQueries = [...new Set(ddgItems.map(q => q.query))];
+    const ddgMisses = uniqueDdgQueries.filter(q => !cached[q] && !freshMap[q]);
+    if (ddgMisses.length > 0) {
       const results = await Promise.allSettled(
-        missQueries.map(async query => {
+        ddgMisses.map(async query => {
           const candidates = await imageProvider.searchMultiple(query, 6);
-          // HEAD-check all in parallel (no Referer — same as referrerpolicy="no-referrer" in browser)
           const checks = await Promise.allSettled(
             candidates.map(url =>
               fetch(url, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(3000) })
-                .then(r => r.ok)
-                .catch(() => false)
+                .then(r => r.ok).catch(() => false)
             )
           );
-          const verified = candidates.filter((_, i) => checks[i].status === "fulfilled" && (checks[i] as PromiseFulfilledResult<boolean>).value);
-          // Use verified URLs if any; fall back to unverified so card isn't imageless
+          const verified = candidates.filter((_, i) =>
+            checks[i].status === "fulfilled" && (checks[i] as PromiseFulfilledResult<boolean>).value
+          );
           const images = (verified.length > 0 ? verified : candidates).slice(0, 3);
           return { query, images };
-        }),
+        })
       );
-
-      const toCache: { query: string; urls: string[] }[] = [];
       for (const r of results) {
         if (r.status === "fulfilled" && r.value.images.length > 0) {
           freshMap[r.value.query] = r.value.images;
           toCache.push({ query: IMG_V + r.value.query, urls: r.value.images });
         }
       }
-      if (toCache.length > 0) {
-        await ctx.runMutation(internal.cache.upsertImageCacheMany, { entries: toCache }).catch(() => {});
-      }
     }
 
-    // Build id → urls[] result map from cached + fresh results
+    if (toCache.length > 0) {
+      await ctx.runMutation(internal.cache.upsertImageCacheMany, { entries: toCache }).catch(() => {});
+    }
+
+    // ── Build id → urls result map ──
     const map: Record<string, string[]> = {};
-    for (const { id, query } of args.queries) {
-      const urls = cached[query] ?? freshMap[query];
+    for (const { id, query, fsqId } of args.queries) {
+      const fsqKey = fsqId ? `fsq:${fsqId}` : null;
+      const urls = (fsqKey && (cached[fsqKey] ?? freshMap[fsqKey]))
+        || cached[query] || freshMap[query];
       if (urls?.length) map[id] = urls;
     }
     return map;
