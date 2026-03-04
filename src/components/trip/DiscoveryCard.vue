@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, computed, watch } from "vue";
 import { CARD_GRADIENTS, CARD_ICONS } from "../../types/trips";
 import type { DiscoveryCard } from "../../types/trips";
 
@@ -6,25 +7,44 @@ const props = defineProps<{
   card: DiscoveryCard;
   pinned: boolean;
 }>();
-const emit = defineEmits<{ togglePin: [id: string] }>();
+const emit = defineEmits<{ togglePin: [id: string]; select: [] }>();
 
 const gradient = (type: string) => CARD_GRADIENTS[type] ?? CARD_GRADIENTS.landmark;
 const iconPath = (type: string) => CARD_ICONS[type] ?? CARD_ICONS.landmark;
-
 const stars = (n: number) => Math.round(n);
+
+// Image fallback cycling — tries card.image, then each imageFallbacks entry on error
+const imgIndex = ref(0);
+watch(() => props.card.id, () => { imgIndex.value = 0; });
+
+const allImageUrls = computed(() =>
+  [props.card.image, ...(props.card.imageFallbacks ?? [])].filter((u): u is string => Boolean(u))
+);
+const effectiveImage = computed(() => allImageUrls.value[imgIndex.value] ?? null);
+
+function onImageError() {
+  if (imgIndex.value < allImageUrls.value.length - 1) {
+    imgIndex.value++;
+  } else {
+    imgIndex.value = 9999; // exhausted all — show gradient
+  }
+}
 </script>
 
 <template>
-  <div class="discovery-card" :class="{ 'discovery-card--pinned': pinned }">
+  <div class="discovery-card" :class="{ 'discovery-card--pinned': pinned }" @click="emit('select')">
     <!-- Hero: real photo when available, gradient fallback -->
-    <div
-      class="card-hero"
-      :style="card.image
-        ? { backgroundImage: `url(${card.image})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-        : { background: gradient(card.type) }"
-    >
+    <div class="card-hero" :style="effectiveImage ? {} : { background: gradient(card.type) }">
+      <!-- referrerpolicy="no-referrer" prevents Referer header → no 403 hotlink blocks -->
+      <img
+        v-if="effectiveImage"
+        :src="effectiveImage"
+        referrerpolicy="no-referrer"
+        class="card-hero__img"
+        @error="onImageError"
+      />
       <!-- Scrim so chips/buttons remain readable over photos -->
-      <div v-if="card.image" class="card-hero__scrim" />
+      <div v-if="effectiveImage" class="card-hero__scrim" />
       <svg v-else class="card-hero__icon" viewBox="0 0 24 24" fill="white">
         <path :d="iconPath(card.type)" />
       </svg>
@@ -118,6 +138,14 @@ const stars = (n: number) => Math.round(n);
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.card-hero__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .card-hero__scrim {

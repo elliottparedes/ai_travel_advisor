@@ -1,27 +1,25 @@
 // ── Places provider ───────────────────────────────────────────────────────────
-// Returns real places (restaurants, landmarks, nightlife, hotels) near a lat/lng.
-//
-// To swap to a paid API for production:
-//   1. Implement the PlacesProvider interface (search + searchAll)
-//   2. Change the last line: export const placesProvider = yourImpl;
-//
-// NOTE: "airbnb" is not in OpenStreetMap — always returns [] and falls
-//       back to AI generation in tripActions.ts.
+// Two modes:
+//   search          — targeted query search for a specific type → per-tab lazy loading
+//   searchProximity — general nearby search with classification (kept for legacy use)
 
-export type PlaceType = "restaurant" | "landmark" | "nightlife" | "hotel" | "airbnb";
+export type PlaceType =
+  | "restaurant" | "landmark" | "nightlife" | "hotel"
+  | "coffee" | "outdoor" | "shopping" | "entertainment";
 
 export interface RawPlace {
   id: string;
+  placeId: string;
   name: string;
   lat: number;
   lng: number;
   rating?: number;
-  priceRange?: string;    // "$" | "$$" | "$$$" | "$$$$"
+  priceRange?: string;
   neighborhood?: string;
   tags: string[];
-  cuisine?: string;       // restaurants
-  category?: string;      // landmarks
-  vibe?: string;          // nightlife
+  cuisine?: string;
+  category?: string;
+  vibe?: string;
 }
 
 export interface AllPlacesResult {
@@ -29,262 +27,235 @@ export interface AllPlacesResult {
   landmark: RawPlace[];
   nightlife: RawPlace[];
   hotel: RawPlace[];
+  coffee: RawPlace[];
+  outdoor: RawPlace[];
+  shopping: RawPlace[];
+  entertainment: RawPlace[];
+}
+
+export interface PlaceDetails {
+  website?: string;
+  tel?: string;
 }
 
 export interface PlacesProvider {
-  // Single-type query — used by generateMoreCards
+  // Targeted search.
+  // Pass `queries` (array) to run multiple focused searches in parallel and deduplicate —
+  // much higher signal than one broad multi-word query.
+  // `strictType` requires a POSITIVE classifyType match; drops anything unclassifiable.
   search(opts: {
     lat: number;
     lng: number;
     type: PlaceType;
+    query?: string;          // single text query
+    queries?: string[];      // multiple text queries — run in parallel, results merged + deduplicated
     radiusMeters?: number;
-    limit?: number;
+    offset?: number;
+    strictType?: boolean;
   }): Promise<RawPlace[]>;
 
-  // Combined query — all 4 types in ONE request (avoids rate-limiting)
-  searchAll(opts: {
+  // Proximity search → classify results by category (legacy, used by fetchCategoryPlaces "all")
+  searchProximity(opts: {
     lat: number;
     lng: number;
     radiusMeters?: number;
+    offset?: number;
   }): Promise<AllPlacesResult>;
+
+  // Fetch detailed info for a single place by FSQ ID
+  getPlaceDetails(fsqId: string): Promise<PlaceDetails>;
 }
 
-// ── Overpass (OpenStreetMap, free) ────────────────────────────────────────────
+// ── Foursquare Places API ─────────────────────────────────────────────────────
 
-// Single-type selectors (used by search / generateMoreCards)
-// {R} → radius metres, {LAT}/{LNG} → coordinates
-const SELECTORS: Record<PlaceType, string> = {
-  restaurant: `
-    node["amenity"="restaurant"](around:{R},{LAT},{LNG});
-    way["amenity"="restaurant"](around:{R},{LAT},{LNG});`,
-  landmark: `
-    node["tourism"~"attraction|museum|gallery|viewpoint|artwork"](around:{R},{LAT},{LNG});
-    node["historic"~"."](around:{R},{LAT},{LNG});
-    node["amenity"~"theatre|cinema|library"](around:{R},{LAT},{LNG});
-    way["tourism"~"attraction|museum|gallery"](around:{R},{LAT},{LNG});
-    way["historic"~"."](around:{R},{LAT},{LNG});`,
-  // Broadened — lounge, music_venue, jazz_cafe, social_club all count
-  nightlife: `
-    node["amenity"~"bar|nightclub|pub|biergarten|casino|lounge|music_venue|jazz_cafe|social_club"](around:{R},{LAT},{LNG});
-    way["amenity"~"bar|nightclub|pub|biergarten|lounge|music_venue"](around:{R},{LAT},{LNG});`,
-  hotel: `
-    node["tourism"~"hotel|hostel|motel|guest_house|apartment"](around:{R},{LAT},{LNG});
-    way["tourism"~"hotel|hostel|motel|guest_house"](around:{R},{LAT},{LNG});`,
-  airbnb: ``,
-};
+const FSQ_BASE = "https://places-api.foursquare.com/places/search";
+const FSQ_PLACE = "https://places-api.foursquare.com/places";
 
-// Combined selector for searchAll — ONE request, all four types
-const ALL_SELECTORS = `
-  node["amenity"="restaurant"](around:{R},{LAT},{LNG});
-  way["amenity"="restaurant"](around:{R},{LAT},{LNG});
-  node["tourism"~"attraction|museum|gallery|viewpoint|artwork"](around:{R},{LAT},{LNG});
-  node["historic"~"."](around:{R},{LAT},{LNG});
-  node["amenity"~"theatre|cinema|library"](around:{R},{LAT},{LNG});
-  way["tourism"~"attraction|museum|gallery"](around:{R},{LAT},{LNG});
-  way["historic"~"."](around:{R},{LAT},{LNG});
-  node["amenity"~"bar|nightclub|pub|biergarten|casino|lounge|music_venue|jazz_cafe|social_club"](around:{R},{LAT},{LNG});
-  way["amenity"~"bar|nightclub|pub|biergarten|lounge|music_venue"](around:{R},{LAT},{LNG});
-  node["tourism"~"hotel|hostel|motel|guest_house|apartment"](around:{R},{LAT},{LNG});
-  way["tourism"~"hotel|hostel|motel|guest_house"](around:{R},{LAT},{LNG});`;
+async function foursquareFetch(url: string): Promise<{ results: any[] }> {
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${process.env.FOURSQUARE_API_KEY ?? ""}`,
+      "X-Places-Api-Version": "2025-06-17",
+      Accept: "application/json",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`Foursquare ${res.status}: ${await res.text().then(t => t.slice(0, 120))}`);
+  }
+  return res.json() as Promise<{ results: any[] }>;
+}
 
-// Priority order for classification — first match wins
-function classifyType(tags: Record<string, string>): Exclude<PlaceType, "airbnb"> | null {
-  const amenity = tags.amenity ?? "";
-  const tourism = tags.tourism ?? "";
+// ── Category classification (used only for "All" tab proximity results) ───────
 
-  if (amenity === "restaurant" || amenity === "cafe") return "restaurant";
+const COFFEE_RE       = /coffee|espresso|café|cafe|tea\s*room|tea\s*house|bubble\s*tea|\bboba\b|juice\s*bar|smoothie|bakery|patisserie|dessert\s*shop|donut|gelato|ice\s*cream|creamery|roaster/i;
+const OUTDOOR_RE      = /\bpark\b|\bgarden\b|hiking|trail|nature\s*preserve|beach|dog\s*park|botanical|forest|\blake\b|waterfall|golf\s*course|recreation\s*center|campground/i;
+const SHOPPING_RE     = /boutique|shopping\s*mall|shopping\s*center|department\s*store|clothing\s*store|fashion\s*retail|vintage\s*store|thrift\s*store|antique\s*store|souvenir|gift\s*shop|jewel|bookstore|toy\s*store|\bapparel\b/i;
+const ENTERTAINMENT_RE = /cinema|movie\s*theater|\barcade\b|bowling|casino|escape\s*room|comedy\s*club|game\s*room|laser\s*tag|mini\s*golf|amusement/i;
+const RESTAURANT_RE   = /restaurant|bistro|brasserie|diner|eatery|pizzeria|sushi|ramen|burger|steakhouse|kitchen|grill|taco|thai|chinese|indian|italian|french|japanese|korean|mexican|seafood|bbq|barbecue|buffet|mediterranean|greek|vietnamese|middle\s*eastern|ethiopian|lebanese|persian|turkish|spanish|cuban|caribbean|peruvian|colombian|latin|asian|african\s*restaurant|german|polish|fusion|\bfood\b/i;
+const NIGHTLIFE_RE    = /\bbar\b|night\s*club|pub|brewery|winery|cidery|lounge|cocktail|speakeasy|tavern|saloon|disco|karaoke|jazz\s*club|beer\s*garden|biergarten|rooftop\s*bar|whisky|whiskey|gin|distillery|gay\s*bar|dance\s*club|dance\s*hall|salsa\s*club|latin\s*bar|strip\s*club|hookah\s*bar|dive\s*bar|gastropub|\bnightlife\b/i;
+const HOTEL_RE        = /hotel|hostel|motel|resort|inn\b|lodge|bed\s*and\s*breakfast|b&b|guesthouse|guest\s*house|suites|apartment|condo|airbnb/i;
+const LANDMARK_RE     = /museum|monument|landmark|theater|theatre|gallery|attraction|historic|plaza|square|church|cathedral|mosque|temple|castle|palace|stadium|amphitheater|memorial|viewpoint|ruins|zoo|aquarium|library|opera|fort|bridge|tower|basilica/i;
 
-  if (
-    ["bar", "nightclub", "pub", "biergarten", "casino", "lounge",
-     "music_venue", "jazz_cafe", "social_club"].includes(amenity)
-  ) return "nightlife";
-
-  if (
-    ["hotel", "hostel", "motel", "guest_house", "apartment"].includes(tourism)
-  ) return "hotel";
-
-  if (
-    ["attraction", "museum", "gallery", "viewpoint", "artwork",
-     "theme_park", "zoo", "aquarium"].includes(tourism)
-  ) return "landmark";
-
-  if (tags.historic) return "landmark";
-
-  if (
-    ["theatre", "cinema", "library", "place_of_worship"].includes(amenity)
-  ) return "landmark";
-
+export function classifyType(categories: any[]): PlaceType | null {
+  for (const cat of (categories ?? [])) {
+    const name: string = cat.name ?? "";
+    if (HOTEL_RE.test(name))         return "hotel";
+    if (COFFEE_RE.test(name))        return "coffee";
+    if (NIGHTLIFE_RE.test(name))     return "nightlife";
+    if (RESTAURANT_RE.test(name))    return "restaurant";
+    if (OUTDOOR_RE.test(name))       return "outdoor";
+    if (SHOPPING_RE.test(name))      return "shopping";
+    if (ENTERTAINMENT_RE.test(name)) return "entertainment";
+    if (LANDMARK_RE.test(name))      return "landmark";
+  }
   return null;
 }
 
-function starsToPriceRange(stars?: string): string | undefined {
-  const n = parseInt(stars ?? "");
-  if (isNaN(n) || n < 1) return undefined;
-  return (["$", "$$", "$$$", "$$$$"] as const)[Math.min(n - 1, 3)];
-}
+// ── Response parsing ──────────────────────────────────────────────────────────
 
-const NIGHTLIFE_VIBE: Record<string, string> = {
-  nightclub: "nightclub",
-  bar: "bar",
-  pub: "pub",
-  biergarten: "beer garden",
-  casino: "casino",
-  lounge: "lounge",
-  music_venue: "live music venue",
-  jazz_cafe: "jazz café",
-  social_club: "social club",
+const PRICE_MAP = ["$", "$$", "$$$", "$$$$"] as const;
+
+const NIGHTLIFE_VIBES: Record<string, string> = {
+  "Nightclub": "nightclub", "Bar": "bar", "Lounge": "lounge",
+  "Pub": "pub", "Brewery": "brewery", "Winery": "winery",
+  "Jazz Club": "jazz club", "Beer Garden": "beer garden",
+  "Cocktail Bar": "cocktail bar", "Speakeasy": "speakeasy",
+  "Gay Bar": "gay bar", "Dive Bar": "dive bar", "Sports Bar": "sports bar",
 };
 
-function elementToRawPlace(el: any, type: PlaceType): RawPlace | null {
-  const tags: Record<string, string> = el.tags ?? {};
+const CATEGORY_TYPES = new Set<PlaceType>(["landmark", "coffee", "outdoor", "shopping", "entertainment"]);
 
-  const name = tags.name || tags["name:en"];
-  if (!name) return null;
-
-  const lat = el.lat ?? el.center?.lat;
-  const lng = el.lon ?? el.center?.lon;
+export function fsqToRawPlace(r: any, type: PlaceType): RawPlace | null {
+  if (!r.name) return null;
+  const lat = r.latitude;
+  const lng = r.longitude;
   if (lat == null || lng == null) return null;
 
-  const neighborhood =
-    tags["addr:suburb"] ||
-    tags["addr:neighbourhood"] ||
-    tags["addr:city_district"] ||
-    tags["addr:quarter"] ||
-    undefined;
-
-  const extraTags: string[] = [];
-  if (tags.outdoor_seating === "yes") extraTags.push("outdoor seating");
-  if (tags.wheelchair === "yes") extraTags.push("accessible");
-  if (tags.takeaway === "yes") extraTags.push("takeaway");
-  if (tags["internet_access"]) extraTags.push("wifi");
-  if (tags.delivery === "yes") extraTags.push("delivery");
-  if (tags.live_music === "yes") extraTags.push("live music");
+  const primaryCategory: string | undefined = r.categories?.[0]?.name;
 
   return {
-    id: `osm-${el.type}-${el.id}`,
-    name,
+    id: `fsq-${r.fsq_place_id}`,
+    placeId: r.fsq_place_id,
+    name: r.name,
     lat,
     lng,
-    rating: tags.stars ? Math.min(parseFloat(tags.stars), 5) : undefined,
-    priceRange: starsToPriceRange(tags.stars),
-    neighborhood,
-    tags: extraTags.slice(0, 4),
-    cuisine: tags.cuisine?.replace(/_/g, " "),
-    category:
-      type === "nightlife"
-        ? undefined
-        : (tags.tourism?.replace(/_/g, " ") ||
-           tags.historic?.replace(/_/g, " ") ||
-           tags.amenity?.replace(/_/g, " ") ||
-           undefined),
-    vibe: type === "nightlife" ? (NIGHTLIFE_VIBE[tags.amenity ?? ""] ?? "bar") : undefined,
+    rating:     r.rating != null ? Math.round((r.rating / 2) * 10) / 10 : undefined,
+    priceRange: r.price  != null ? PRICE_MAP[Math.min(r.price - 1, 3)] : undefined,
+    neighborhood: r.location?.neighborhood ?? undefined,
+    tags: (r.categories ?? []).slice(1, 4).map((c: any) => c.name as string),
+    cuisine:  type === "restaurant" ? primaryCategory : undefined,
+    category: CATEGORY_TYPES.has(type) ? primaryCategory : undefined,
+    vibe:     type === "nightlife"
+      ? (NIGHTLIFE_VIBES[primaryCategory ?? ""] ?? primaryCategory?.toLowerCase() ?? "bar")
+      : undefined,
   };
 }
 
-async function overpassFetch(query: string): Promise<{ elements: any[] }> {
-  const res = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `data=${encodeURIComponent(query)}`,
-  });
-  if (!res.ok) {
-    throw new Error(`Overpass ${res.status}: ${await res.text().then(t => t.slice(0, 120))}`);
-  }
-  return res.json() as Promise<{ elements: any[] }>;
+// ── Fetch helpers ─────────────────────────────────────────────────────────────
+
+async function fetchNearby(lat: number, lng: number, radius: number, limit: number, offset = 0): Promise<any[]> {
+  const url = `${FSQ_BASE}?ll=${lat},${lng}&radius=${radius}&limit=${Math.min(limit, 50)}&offset=${offset}`;
+  return foursquareFetch(url).then(d => d.results ?? []).catch(() => []);
 }
 
-const overpass: PlacesProvider = {
-  // Used by generateMoreCards — safe to call individually since it's one request
-  async search({ lat, lng, type, radiusMeters = 5000, limit = 20 }) {
-    if (type === "airbnb") return [];
+// ── Provider ──────────────────────────────────────────────────────────────────
 
-    const sel = SELECTORS[type]
-      .replace(/{R}/g, String(radiusMeters))
-      .replace(/{LAT}/g, String(lat))
-      .replace(/{LNG}/g, String(lng));
-    const query = `[out:json][timeout:25];(${sel});out body center ${limit * 3};`;
+const foursquare: PlacesProvider = {
+  // Targeted search with optional strict type post-filtering
+  async search({ lat, lng, type, query, queries, radiusMeters = 15000, offset = 0, strictType = false }) {
+    let raw: any[];
 
-    const data = await overpassFetch(query);
+    if (queries && queries.length > 0) {
+      // Run each focused query in parallel (1 page each) — higher signal than one broad query.
+      // FSQ text search matches category names too, so "bar" returns Bar/Cocktail Bar/Dive Bar/etc.
+      const pages = await Promise.all(
+        queries.map(q =>
+          foursquareFetch(
+            `${FSQ_BASE}?ll=${lat},${lng}&query=${encodeURIComponent(q)}&radius=${radiusMeters}&limit=50&offset=${offset}`
+          ).then(d => d.results ?? []).catch(() => [])
+        )
+      );
+      raw = pages.flat();
+    } else {
+      const base = `${FSQ_BASE}?ll=${lat},${lng}&query=${encodeURIComponent(query ?? "")}&radius=${radiusMeters}&limit=50`;
+      const [p0, p1] = await Promise.all([
+        foursquareFetch(`${base}&offset=${offset}`).then(d => d.results ?? []).catch(() => []),
+        foursquareFetch(`${base}&offset=${offset + 50}`).then(d => d.results ?? []).catch(() => []),
+      ]);
+      raw = [...p0, ...p1];
+    }
 
     const seen = new Set<string>();
-    return data.elements
-      .map((el) => elementToRawPlace(el, type))
-      .filter((p): p is RawPlace => {
-        if (!p || seen.has(p.name)) return false;
-        seen.add(p.name);
-        return true;
-      })
-      .slice(0, limit);
+    const results: RawPlace[] = [];
+    for (const r of raw) {
+      if (strictType) {
+        // Require a POSITIVE match — drop anything classifyType doesn't confirm as this type.
+        // Dropping nulls is intentional: unclassifiable venues (cinemas, museums, restaurants)
+        // slip through otherwise since they don't match any negative pattern.
+        const classified = classifyType(r.categories ?? []);
+        if (classified !== type) continue;
+      }
+      const place = fsqToRawPlace(r, type);
+      if (!place || seen.has(place.name)) continue;
+      seen.add(place.name);
+      results.push(place);
+    }
+    return results;
   },
 
-  // Used by enrichDestination — ONE request for all 4 types, avoids rate-limiting
-  async searchAll({ lat, lng, radiusMeters = 5000 }) {
-    const sel = ALL_SELECTORS
-      .replace(/{R}/g, String(radiusMeters))
-      .replace(/{LAT}/g, String(lat))
-      .replace(/{LNG}/g, String(lng));
-    // Generous output limit: (20+16+12+10) * 3
-    const query = `[out:json][timeout:30];(${sel});out body center 174;`;
+  // Proximity with classification — used by "all" tab in fetchCategoryPlaces
+  async searchProximity({ lat, lng, radiusMeters = 8000, offset = 0 }) {
+    const [p0, p1] = await Promise.all([
+      fetchNearby(lat, lng, radiusMeters, 50, offset),
+      fetchNearby(lat, lng, radiusMeters, 50, offset + 50),
+    ]);
+    const raw = [...p0, ...p1];
 
-    const data = await overpassFetch(query);
-
-    const limits: Record<Exclude<PlaceType, "airbnb">, number> = {
-      restaurant: 20,
-      landmark: 16,
-      nightlife: 12,
-      hotel: 10,
+    const limits: Record<PlaceType, number> = {
+      restaurant: 20, landmark: 15, nightlife: 15, hotel: 8,
+      coffee: 12, outdoor: 10, shopping: 8, entertainment: 8,
+    };
+    const result: AllPlacesResult = {
+      restaurant: [], landmark: [], nightlife: [], hotel: [],
+      coffee: [], outdoor: [], shopping: [], entertainment: [],
+    };
+    const seen: Record<PlaceType, Set<string>> = {
+      restaurant: new Set(), landmark: new Set(), nightlife: new Set(), hotel: new Set(),
+      coffee: new Set(), outdoor: new Set(), shopping: new Set(), entertainment: new Set(),
     };
 
-    const result: AllPlacesResult = { restaurant: [], landmark: [], nightlife: [], hotel: [] };
-    const seen: Record<string, Set<string>> = {
-      restaurant: new Set(),
-      landmark: new Set(),
-      nightlife: new Set(),
-      hotel: new Set(),
-    };
-
-    for (const el of data.elements) {
-      const tags = el.tags ?? {};
-      const type = classifyType(tags);
+    for (const r of raw) {
+      const type = classifyType(r.categories ?? []);
       if (!type) continue;
-
       if (result[type].length >= limits[type]) continue;
-
-      const place = elementToRawPlace(el, type);
+      const place = fsqToRawPlace(r, type);
       if (!place || seen[type].has(place.name)) continue;
-
       seen[type].add(place.name);
       result[type].push(place);
     }
 
     return result;
   },
+
+  // Fetch detailed info for a single place (Pro fields only — no Premium billing)
+  async getPlaceDetails(fsqId: string): Promise<PlaceDetails> {
+    const res = await fetch(
+      `${FSQ_PLACE}/${fsqId}?fields=website,tel`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.FOURSQUARE_API_KEY ?? ""}`,
+          "X-Places-Api-Version": "2025-06-17",
+          Accept: "application/json",
+        },
+      },
+    );
+    if (!res.ok) return {};
+    const data = await res.json();
+    return {
+      website: data.website,
+      tel:     data.tel,
+    };
+  },
 };
 
-// ── Production swap (example: Foursquare Places API) ─────────────────────────
-// const FOURSQUARE_CATEGORIES: Partial<Record<PlaceType, string>> = {
-//   restaurant: "13065", landmark: "16000", nightlife: "10032", hotel: "19014",
-// };
-// const foursquare: PlacesProvider = {
-//   async search({ lat, lng, type, limit = 20 }) {
-//     const cat = FOURSQUARE_CATEGORIES[type];
-//     if (!cat) return [];
-//     const url = `https://api.foursquare.com/v3/places/search?ll=${lat},${lng}&categories=${cat}&limit=${limit}`;
-//     const res = await fetch(url, { headers: { Authorization: process.env.FOURSQUARE_KEY ?? "" } });
-//     const data = await res.json();
-//     return data.results.map((r: any): RawPlace => ({
-//       id: `fsq-${r.fsq_id}`, name: r.name,
-//       lat: r.geocodes.main.latitude, lng: r.geocodes.main.longitude,
-//       neighborhood: r.location?.neighborhood?.[0],
-//       tags: r.categories.map((c: any) => c.name),
-//       category: r.categories[0]?.name,
-//     }));
-//   },
-//   async searchAll({ lat, lng }) {
-//     const types: PlaceType[] = ["restaurant", "landmark", "nightlife", "hotel"];
-//     const results = await Promise.all(types.map(t => foursquare.search({ lat, lng, type: t })));
-//     return Object.fromEntries(types.map((t, i) => [t, results[i]])) as AllPlacesResult;
-//   },
-// };
-
-export const placesProvider: PlacesProvider = overpass;
+export const placesProvider: PlacesProvider = foursquare;

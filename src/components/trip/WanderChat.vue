@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, nextTick, watch } from "vue";
+import { marked } from "marked";
 import { useTripStore } from "../../stores/tripStore";
+
+marked.setOptions({ breaks: true, gfm: true });
 
 const store = useTripStore();
 const input = ref("");
@@ -22,16 +25,13 @@ async function send() {
   await store.sendMessage(text);
 }
 
-// Simple markdown: headings, bold, italic, bullets, line breaks
 function renderContent(text: string): string {
-  return text
-    .replace(/^### (.+)$/gm, '<span class="md-h3">$1</span>')
-    .replace(/^## (.+)$/gm, '<span class="md-h2">$1</span>')
-    .replace(/^# (.+)$/gm, '<span class="md-h1">$1</span>')
-    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.*?)\*/g, "<em>$1</em>")
-    .replace(/^- (.+)$/gm, "• $1")
-    .replace(/\n/g, "<br>");
+  const clean = text.replace(/\[\^?\d+\]/g, "");
+  const html = marked.parse(clean) as string;
+  // Wrap tables in a scrollable div (post-process to avoid renderer API issues)
+  return html
+    .replace(/<table/g, '<div class="table-wrap"><table')
+    .replace(/<\/table>/g, "</table></div>");
 }
 </script>
 
@@ -335,28 +335,84 @@ function renderContent(text: string): string {
   cursor: not-allowed;
 }
 
-/* ── Markdown heading styles (v-html, need :deep) ── */
-:deep(.md-h1) {
-  display: block;
-  font-size: 1rem;
-  font-weight: 800;
-  color: var(--text-primary);
-  margin: 6px 0 2px;
+/* ── Rendered markdown styles ── */
+:deep(.msg-bubble p) { margin: 0 0 6px; }
+:deep(.msg-bubble p:last-child) { margin-bottom: 0; }
+
+:deep(.msg-bubble h1) { font-size: 1rem; font-weight: 800; margin: 8px 0 4px; color: var(--text-primary); }
+:deep(.msg-bubble h2) { font-size: 0.92rem; font-weight: 700; margin: 7px 0 3px; color: var(--text-primary); }
+:deep(.msg-bubble h3) { font-size: 0.86rem; font-weight: 700; margin: 6px 0 2px; color: var(--text-primary); }
+
+:deep(.msg-bubble ul),
+:deep(.msg-bubble ol) {
+  padding-left: 18px;
+  margin: 4px 0 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+:deep(.msg-bubble li) { font-size: 0.84rem; line-height: 1.5; }
+
+:deep(.msg-bubble strong) { font-weight: 700; color: var(--text-primary); }
+:deep(.msg-bubble em) { font-style: italic; }
+
+:deep(.msg-bubble code) {
+  font-family: monospace;
+  font-size: 0.8rem;
+  background: rgba(0,0,0,0.2);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
-:deep(.md-h2) {
-  display: block;
-  font-size: 0.92rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 5px 0 2px;
+/* Tables — wrap in scrollable div to prevent clipping */
+:deep(.msg-bubble table) {
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  margin: 8px 0 4px;
+  min-width: 100%;
 }
 
-:deep(.md-h3) {
-  display: block;
-  font-size: 0.86rem;
-  font-weight: 700;
+:deep(.msg-bubble .table-wrap) {
+  overflow-x: auto;
+  margin: 8px 0 4px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+:deep(.msg-bubble th) {
+  background: rgba(99,102,241,0.15);
   color: var(--text-primary);
-  margin: 4px 0 1px;
+  font-weight: 700;
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  border-right: 1px solid rgba(255,255,255,0.06);
+  white-space: nowrap;
+}
+
+:deep(.msg-bubble td) {
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  border-right: 1px solid rgba(255,255,255,0.05);
+  color: var(--text-secondary);
+  vertical-align: top;
+  line-height: 1.45;
+}
+
+:deep(.msg-bubble tr:last-child td) { border-bottom: none; }
+:deep(.msg-bubble th:last-child),
+:deep(.msg-bubble td:last-child) { border-right: none; }
+
+:deep(.msg-bubble tr:nth-child(even) td) {
+  background: rgba(255,255,255,0.02);
+}
+
+/* Wander bubble expands to fill, with scrollable overflow for tables */
+.message--wander {
+  max-width: calc(100% - 36px);
+}
+
+:deep(.msg-bubble) {
+  overflow-x: auto;
 }
 </style>

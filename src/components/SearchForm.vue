@@ -27,6 +27,7 @@ const seat = ref<SeatClass>("economy");
 const maxStops = ref<number | undefined>(undefined);
 const fetchMode = ref<FetchMode>("fallback");
 const showAdvanced = ref(false);
+const submitted = ref(false);
 
 // ── Passenger field descriptors (reactive) ────────────────────────────────
 const paxFields = computed(() => [
@@ -92,6 +93,7 @@ watch(trip, (val) => {
 
 // ── Submit ────────────────────────────────────────────────────────────────
 function handleSubmit() {
+  submitted.value = true;
   if (!canSearch.value) return;
 
   const params: FlightSearchParams = {
@@ -271,8 +273,8 @@ function handleSubmit() {
       </div>
     </div>
 
-    <!-- Validation errors -->
-    <ul v-if="errors.length > 0" class="error-list">
+    <!-- Validation errors — only shown after first submit attempt -->
+    <ul v-if="submitted && errors.length > 0" class="error-list">
       <li v-for="err in errors" :key="err" class="error-item">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
           <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>

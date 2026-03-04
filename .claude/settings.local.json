@@ -3,7 +3,13 @@
     "allow": [
       "Bash(npx vue-tsc:*)",
       "Bash(npx convex:*)",
-      "Bash(npx vite:*)"
+      "Bash(npx vite:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.foursquare.com)",
+      "Bash(curl:*)",
+      "WebFetch(domain:www.brevo.com)",
+      "WebFetch(domain:api.search.brave.com)",
+      "WebFetch(domain:brave.com)"
     ]
   }
 }

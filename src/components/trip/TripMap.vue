@@ -12,15 +12,19 @@ const props = defineProps<{
   centerLng: number;
 }>();
 
-const emit = defineEmits<{ togglePin: [id: string] }>();
+const emit = defineEmits<{ togglePin: [id: string]; selectCard: [card: DiscoveryCard] }>();
 
 // Marker colors per card type (must be CSS-safe hex for SVG)
 const MARKER_COLORS: Record<string, string> = {
-  restaurant: "#f59e0b",
-  landmark: "#6366f1",
-  nightlife: "#7c3aed",
-  hotel: "#0d9488",
-  airbnb: "#f43f5e",
+  restaurant:    "#f59e0b",
+  landmark:      "#6366f1",
+  nightlife:     "#7c3aed",
+  hotel:         "#0d9488",
+  coffee:        "#b45309",
+  outdoor:       "#16a34a",
+  shopping:      "#db2777",
+  entertainment: "#2563eb",
+  airbnb:        "#f43f5e",
 };
 
 function markerSvg(color: string, pinned: boolean): string {
@@ -52,13 +56,18 @@ onMounted(() => {
   map = L.map("trip-map", {
     center: [props.centerLat || 48.8566, props.centerLng || 2.3522],
     zoom: 13,
-    zoomControl: true,
+    zoomControl: false,
   });
 
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "© OpenStreetMap contributors",
-    maxZoom: 19,
+  // CartoDB Dark Matter — minimal dark tiles, no API key required
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    attribution: '© <a href="https://carto.com/">CARTO</a>',
+    subdomains: "abcd",
+    maxZoom: 20,
   }).addTo(map);
+
+  // Zoom control bottom-right so it doesn't crowd the top
+  L.control.zoom({ position: "bottomright" }).addTo(map);
 
   addMarkers();
 
@@ -88,23 +97,33 @@ function addMarkers() {
     const marker = L.marker([card.lat, card.lng], { icon })
       .addTo(map!)
       .bindPopup(
-        `<div style="font-family:system-ui;min-width:160px">
-          <strong style="font-size:0.9rem">${card.title}</strong>
-          <p style="font-size:0.75rem;color:#64748b;margin:4px 0 8px">${card.neighborhood ?? card.type}</p>
-          ${card.rating ? `<span style="color:#f59e0b;font-size:0.8rem">★ ${card.rating}</span>` : ""}
-          ${card.priceRange ? `<span style="font-size:0.8rem;margin-left:8px;color:#059669">${card.priceRange}</span>` : ""}
-          <br><button onclick="window.__wanderPin('${card.id}')" style="margin-top:8px;padding:4px 12px;background:#6366f1;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.78rem">
-            ${pinned ? "Unpin ♥" : "Pin ♡"}
-          </button>
+        `<div style="font-family:system-ui;min-width:150px;color:#f1f5f9">
+          <strong style="font-size:0.85rem;display:block;margin-bottom:2px">${card.title}</strong>
+          <span style="font-size:0.72rem;color:#94a3b8;text-transform:capitalize">${card.neighborhood ?? card.type}</span>
+          <div style="margin-top:5px;display:flex;align-items:center;gap:8px">
+            ${card.rating ? `<span style="color:#f59e0b;font-size:0.78rem">★ ${card.rating}</span>` : ""}
+            ${card.priceRange ? `<span style="font-size:0.78rem;color:#34d399">${card.priceRange}</span>` : ""}
+          </div>
+          <div style="margin-top:7px;display:flex;gap:6px">
+            <button onclick="window.__wanderPin('${card.id}')" style="flex:1;padding:5px 0;background:#6366f1;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.75rem;font-weight:500">
+              ${pinned ? "♥ Pinned" : "♡ Pin"}
+            </button>
+            <button onclick="window.__wanderSelect('${card.id}')" style="flex:1;padding:5px 0;background:rgba(255,255,255,0.08);color:#f1f5f9;border:1px solid rgba(255,255,255,0.15);border-radius:6px;cursor:pointer;font-size:0.75rem;font-weight:500">
+              Open →
+            </button>
+          </div>
         </div>`,
+        { className: "wander-popup" },
       );
 
     markers.set(card.id, marker);
   });
 
-  // Expose pin handler for popup buttons
-  (window as any).__wanderPin = (id: string) => {
-    emit("togglePin", id);
+  // Expose handlers for popup buttons
+  (window as any).__wanderPin = (id: string) => emit("togglePin", id);
+  (window as any).__wanderSelect = (id: string) => {
+    const card = props.cards.find(c => c.id === id);
+    if (card) emit("selectCard", card);
   };
 }
 
@@ -126,3 +145,34 @@ watch(
 <template>
   <div id="trip-map" style="width: 100%; height: 100%;" />
 </template>
+
+<style>
+/* Leaflet popup overrides — must be global (not scoped) */
+.wander-popup .leaflet-popup-content-wrapper {
+  background: #1a2235;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.45);
+  padding: 0;
+}
+
+.wander-popup .leaflet-popup-content {
+  margin: 10px 12px;
+  color: #f1f5f9;
+}
+
+.wander-popup .leaflet-popup-tip {
+  background: #1a2235;
+}
+
+.wander-popup .leaflet-popup-close-button {
+  color: rgba(255,255,255,0.45) !important;
+  top: 6px !important;
+  right: 8px !important;
+}
+
+.wander-popup .leaflet-popup-close-button:hover {
+  color: white !important;
+  background: none !important;
+}
+</style>

@@ -2,7 +2,11 @@
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { useTripStore } from "../../stores/tripStore";
 import { CARD_FILTERS } from "../../types/trips";
+import type { DiscoveryCard as DiscoveryCardType, PlaceDetails } from "../../types/trips";
+import * as tripsApi from "../../api/tripsApi";
 import DiscoveryCard from "./DiscoveryCard.vue";
+import SkeletonCard from "./SkeletonCard.vue";
+import PlaceDetailPanel from "./PlaceDetailPanel.vue";
 import TripMap from "./TripMap.vue";
 
 const store = useTripStore();
@@ -25,7 +29,6 @@ onMounted(() => {
 
 onUnmounted(() => observer?.disconnect());
 
-// Re-observe after filter change (sentinel may become visible instantly)
 watch(
   () => store.activeFilter,
   async () => {
@@ -38,6 +41,26 @@ watch(
 
 // ── Map toggle ───────────────────────────────────────────────────────────────
 const showMap = ref(false);
+
+// ── Place detail panel ───────────────────────────────────────────────────────
+const selectedCard = ref<DiscoveryCardType | null>(null);
+const placeDetails = ref<PlaceDetails | null>(null);
+const isLoadingDetails = ref(false);
+
+async function openCard(card: DiscoveryCardType) {
+  selectedCard.value = card;
+  placeDetails.value = null;
+  if (card.fsqId) {
+    isLoadingDetails.value = true;
+    try {
+      placeDetails.value = await tripsApi.getPlaceDetails(card.fsqId);
+    } catch {
+      placeDetails.value = null;
+    } finally {
+      isLoadingDetails.value = false;
+    }
+  }
+}
 </script>
 
 <template>
@@ -90,6 +113,7 @@ const showMap = ref(false);
           :center-lat="store.destinationInfo?.lat ?? 0"
           :center-lng="store.destinationInfo?.lng ?? 0"
           @toggle-pin="store.togglePin"
+          @select-card="openCard"
         />
       </div>
     </Transition>
@@ -105,14 +129,18 @@ const showMap = ref(false);
       >
         <span class="filter-emoji">{{ f.emoji }}</span>
         <span>{{ f.label }}</span>
-        <span v-if="f.key !== 'all'" class="filter-count">
-          {{ store.allCards.filter(c => c.type === f.key).length }}
-        </span>
       </button>
     </div>
 
+    <!-- Skeleton cards while category loads -->
+    <div v-if="store.isLoadingCategory" class="masonry">
+      <div class="masonry-col" v-for="col in 3" :key="col">
+        <SkeletonCard v-for="n in 4" :key="n" />
+      </div>
+    </div>
+
     <!-- Masonry grid -->
-    <div class="masonry">
+    <div v-else class="masonry">
       <div class="masonry-col" v-for="col in 3" :key="col">
         <DiscoveryCard
           v-for="card in store.displayedCards.filter((_, i) => i % 3 === col - 1)"
@@ -120,6 +148,7 @@ const showMap = ref(false);
           :card="card"
           :pinned="store.pinnedIds.has(card.id)"
           @toggle-pin="store.togglePin"
+          @select="openCard(card)"
         />
       </div>
     </div>
@@ -133,9 +162,20 @@ const showMap = ref(false);
     </div>
 
     <!-- No results -->
-    <div v-if="store.filteredCards.length === 0 && !store.isLoadingMore" class="empty">
-      No {{ store.activeFilter === 'all' ? 'places' : store.activeFilter + 's' }} found yet.
+    <div v-if="store.filteredCards.length === 0 && !store.isLoadingMore && !store.isLoadingCategory" class="empty">
+      No {{ CARD_FILTERS.find(f => f.key === store.activeFilter)?.label.toLowerCase() ?? store.activeFilter }} found yet.
     </div>
+
+    <!-- Place detail panel -->
+    <PlaceDetailPanel
+      v-if="selectedCard"
+      :card="selectedCard"
+      :details="placeDetails"
+      :is-loading="isLoadingDetails"
+      :pinned="store.pinnedIds.has(selectedCard.id)"
+      @close="selectedCard = null"
+      @toggle-pin="store.togglePin"
+    />
   </div>
 </template>
 
@@ -256,6 +296,7 @@ const showMap = ref(false);
   border-radius: var(--radius-lg);
   overflow: hidden;
   border: 1px solid var(--border);
+  isolation: isolate;
 }
 
 .slide-down-enter-active, .slide-down-leave-active {
@@ -271,12 +312,9 @@ const showMap = ref(false);
 /* ── Filters ── */
 .filter-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-  scrollbar-width: none;
 }
-.filter-bar::-webkit-scrollbar { display: none; }
 
 .filter-tab {
   display: inline-flex;
@@ -306,12 +344,6 @@ const showMap = ref(false);
 }
 
 .filter-emoji { font-size: 0.9rem; }
-
-.filter-count {
-  font-size: 0.68rem;
-  opacity: 0.75;
-  font-weight: 700;
-}
 
 /* ── Masonry ── */
 .masonry {

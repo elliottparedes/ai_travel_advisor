@@ -1,24 +1,23 @@
 import { convexClient } from "./client";
 import { api } from "../../convex/_generated/api";
-import type { DiscoveryCard, DestinationInfo, SavedTrip, ChatMessage } from "../types/trips";
+import type { DiscoveryCard, DestinationInfo, SavedTrip, PlaceDetails } from "../types/trips";
 import type { Id } from "../../convex/_generated/dataModel";
 
 export async function enrichDestination(destination: string): Promise<{
   info: DestinationInfo;
-  cards: DiscoveryCard[];
 }> {
   return await convexClient.action(api.tripActions.enrichDestination, { destination });
 }
 
-export async function generateMoreCards(opts: {
+export async function fetchCategoryPlaces(opts: {
+  lat: number;
+  lng: number;
   city: string;
-  country: string;
   category: string;
+  offset: number;
   existingTitles: string[];
-  cityLat?: number;
-  cityLng?: number;
 }): Promise<DiscoveryCard[]> {
-  return await convexClient.action(api.tripActions.generateMoreCards, opts);
+  return await convexClient.action(api.tripActions.fetchCategoryPlaces, opts);
 }
 
 export async function chatWithWander(opts: {
@@ -44,9 +43,17 @@ export async function saveTrip(opts: {
 }
 
 export async function fetchCardImages(
-  queries: { id: string; query: string }[],
-): Promise<Record<string, string>> {
+  queries: { id: string; query: string; fsqId?: string }[],
+): Promise<Record<string, string[]>> {
   return await convexClient.action(api.tripActions.fetchCardImages, { queries });
+}
+
+export async function getPlaceDetails(fsqId: string): Promise<PlaceDetails> {
+  return await convexClient.action(api.tripActions.getPlaceDetails, { fsqId });
+}
+
+export async function fetchPlacePhotos(query: string): Promise<string[]> {
+  return await convexClient.action(api.tripActions.fetchPlacePhotos, { query });
 }
 
 export async function updateTrip(opts: {

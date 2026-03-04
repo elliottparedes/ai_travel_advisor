@@ -4,7 +4,7 @@ import type { DiscoveryCard, DestinationInfo, ChatMessage, CardType } from "../t
 import * as tripsApi from "../api/tripsApi";
 import { useAuthStore } from "./authStore";
 
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 24;
 
 export const useTripStore = defineStore("trip", () => {
   // ── Wizard navigation ──────────────────────────────────────────────────────
@@ -19,9 +19,13 @@ export const useTripStore = defineStore("trip", () => {
   const destinationInfo = ref<DestinationInfo | null>(null);
   const allCards = ref<DiscoveryCard[]>([]);
   const pinnedIds = ref<Set<string>>(new Set());
-  const activeFilter = ref<CardType | "all">("all");
+  const activeFilter = ref<CardType>("restaurant");
   const visibleCount = ref(PAGE_SIZE);
   const isLoadingMore = ref(false);
+  // Per-tab lazy loading
+  const loadedCategories = ref<Set<string>>(new Set());
+  const isLoadingCategory = ref(false);
+  const categoryOffsets = ref<Record<string, number>>({});
 
   // ── Step 3 ─────────────────────────────────────────────────────────────────
   const savedTripName = ref<string | null>(null);
@@ -33,10 +37,9 @@ export const useTripStore = defineStore("trip", () => {
   const isSaving = ref(false);
 
   // ── Computed ───────────────────────────────────────────────────────────────
-  const filteredCards = computed(() => {
-    if (activeFilter.value === "all") return allCards.value;
-    return allCards.value.filter((c) => c.type === activeFilter.value);
-  });
+  const filteredCards = computed(() =>
+    allCards.value.filter((c) => c.type === activeFilter.value),
+  );
 
   const displayedCards = computed(() =>
     filteredCards.value.slice(0, visibleCount.value),
@@ -58,13 +61,15 @@ export const useTripStore = defineStore("trip", () => {
     try {
       const result = await tripsApi.enrichDestination(destinationInput.value.trim());
       destinationInfo.value = result.info;
-      allCards.value = result.cards;
+      allCards.value = [];
       pinnedIds.value = new Set();
       visibleCount.value = PAGE_SIZE;
-      activeFilter.value = "all";
+      activeFilter.value = "restaurant";
+      loadedCategories.value = new Set();
+      categoryOffsets.value = {};
       step.value = 2;
-      // Fetch images in the background — cards update reactively as they arrive
-      _fetchImages(result.cards, result.info.city);
+      // Fire-and-forget — skeleton cards shown while this loads
+      _loadCategory("restaurant");
     } catch (err) {
       enrichError.value = err instanceof Error ? err.message : "Failed to load destination.";
     } finally {
@@ -72,22 +77,63 @@ export const useTripStore = defineStore("trip", () => {
     }
   }
 
-  async function _fetchImages(cards: typeof allCards.value, city: string) {
-    const queries = cards.slice(0, 16).map((c) => ({
-      id: c.id,
-      query: `${c.title} ${city}`,
-    }));
-    try {
-      const images = await tripsApi.fetchCardImages(queries);
-      allCards.value = allCards.value.map((c) =>
-        images[c.id] ? { ...c, image: images[c.id] } : c,
-      );
-    } catch { /* images are optional — silently ignore failures */ }
-  }
-
-  function setFilter(f: CardType | "all") {
+  function setFilter(f: CardType) {
     activeFilter.value = f;
     visibleCount.value = PAGE_SIZE;
+    // Lazy-load this category if not yet fetched
+    if (!loadedCategories.value.has(f) && destinationInfo.value) {
+      _loadCategory(f);
+    }
+  }
+
+  async function _loadCategory(category: CardType) {
+    if (!destinationInfo.value?.lat || !destinationInfo.value?.lng) return;
+    if (isLoadingCategory.value) return;
+    isLoadingCategory.value = true;
+
+    let fetchedCards: DiscoveryCard[] = [];
+    try {
+      const { lat, lng, city } = destinationInfo.value;
+      const existingTitles = allCards.value
+        .filter(c => c.type === category)
+        .map(c => c.title);
+
+      fetchedCards = await tripsApi.fetchCategoryPlaces({
+        lat: lat!,
+        lng: lng!,
+        city,
+        category,
+        offset: 0,
+        existingTitles,
+      });
+
+      // Show cards immediately with gradient fallbacks — don't block on images
+      allCards.value = [...allCards.value, ...fetchedCards];
+      loadedCategories.value = new Set([...loadedCategories.value, category]);
+      categoryOffsets.value[category] = 100;
+    } finally {
+      isLoadingCategory.value = false;
+    }
+
+    // Load images in parallel batches — all batches fire at once for speed
+    if (fetchedCards.length === 0 || !destinationInfo.value?.city) return;
+    const city = destinationInfo.value.city;
+    const BATCH = 8;
+    const queries = fetchedCards.map(c => ({ id: c.id, query: `${c.title} ${city}`, fsqId: c.fsqId }));
+    const batches: { id: string; query: string; fsqId?: string }[][] = [];
+    for (let i = 0; i < queries.length; i += BATCH) batches.push(queries.slice(i, i + BATCH));
+
+    const imageMaps = await Promise.all(
+      batches.map(b => tripsApi.fetchCardImages(b).catch(() => ({} as Record<string, string[]>)))
+    );
+    const merged = Object.assign({}, ...imageMaps);
+    if (Object.keys(merged).length > 0) {
+      allCards.value = allCards.value.map(c => {
+        const urls = merged[c.id];
+        if (!urls?.length) return c;
+        return { ...c, image: urls[0], imageFallbacks: urls.slice(1) };
+      });
+    }
   }
 
   function togglePin(id: string) {
@@ -95,41 +141,62 @@ export const useTripStore = defineStore("trip", () => {
       pinnedIds.value.delete(id);
     } else {
       pinnedIds.value.add(id);
-      // Signal to the board that a new pin was added on an existing saved trip
       if (savedTripId.value) pinJustAdded.value = true;
     }
-    // Trigger reactivity
     pinnedIds.value = new Set(pinnedIds.value);
   }
 
   async function loadMore() {
-    if (isLoadingMore.value) return;
+    if (isLoadingMore.value || isLoadingCategory.value) return;
 
     if (hasMoreToShow.value) {
       visibleCount.value += PAGE_SIZE;
       return;
     }
 
-    // Need fresh cards from AI
-    if (!destinationInfo.value) return;
+    if (!destinationInfo.value?.lat || !destinationInfo.value?.lng) return;
     isLoadingMore.value = true;
     try {
-      const category = activeFilter.value === "all" ? "attraction" : activeFilter.value;
-      const existing = allCards.value
-        .filter((c) => activeFilter.value === "all" || c.type === activeFilter.value)
-        .map((c) => c.title);
+      const { lat, lng, city } = destinationInfo.value;
+      const cat = activeFilter.value;
+      const offset = categoryOffsets.value[cat] ?? 100;
+      const existingTitles = allCards.value
+        .filter(c => c.type === cat)
+        .map(c => c.title);
 
-      const more = await tripsApi.generateMoreCards({
-        city: destinationInfo.value.city,
-        country: destinationInfo.value.country,
-        category,
-        existingTitles: existing,
-        cityLat: destinationInfo.value.lat,
-        cityLng: destinationInfo.value.lng,
+      const more = await tripsApi.fetchCategoryPlaces({
+        lat: lat!,
+        lng: lng!,
+        city,
+        category: cat,
+        offset,
+        existingTitles,
       });
+
+      // Show cards immediately, patch images async
       allCards.value = [...allCards.value, ...more];
+      categoryOffsets.value[cat] = offset + 100;
       visibleCount.value += PAGE_SIZE;
-      _fetchImages(more, destinationInfo.value.city);
+      isLoadingMore.value = false;
+
+      // Load images in parallel batches
+      if (more.length > 0) {
+        const BATCH = 8;
+        const queries = more.map(c => ({ id: c.id, query: `${c.title} ${city}`, fsqId: c.fsqId }));
+        const batches: { id: string; query: string; fsqId?: string }[][] = [];
+        for (let i = 0; i < queries.length; i += BATCH) batches.push(queries.slice(i, i + BATCH));
+        const imageMaps = await Promise.all(
+          batches.map(b => tripsApi.fetchCardImages(b).catch(() => ({} as Record<string, string[]>)))
+        );
+        const merged = Object.assign({}, ...imageMaps);
+        if (Object.keys(merged).length > 0) {
+          allCards.value = allCards.value.map(c => {
+            const urls = merged[c.id];
+            if (!urls?.length) return c;
+            return { ...c, image: urls[0], imageFallbacks: urls.slice(1) };
+          });
+        }
+      }
     } finally {
       isLoadingMore.value = false;
     }
@@ -173,7 +240,7 @@ export const useTripStore = defineStore("trip", () => {
         destination: `${destinationInfo.value.city}, ${destinationInfo.value.country}`,
         city: destinationInfo.value.city,
         pinnedSummary: pinnedCards.value.map((c) => c.title).join(", ") || "none",
-        history: chatHistory.value.slice(-20), // keep last 20 messages to avoid token limits
+        history: chatHistory.value.slice(-20),
         userMessage: content,
       });
 
@@ -205,7 +272,6 @@ export const useTripStore = defineStore("trip", () => {
       const tripName = name || `Trip to ${destinationInfo.value.city}`;
 
       if (savedTripId.value) {
-        // Overwrite the existing trip
         await tripsApi.updateTrip({
           token: auth.sessionToken,
           tripId: savedTripId.value,
@@ -217,7 +283,6 @@ export const useTripStore = defineStore("trip", () => {
         return savedTripId.value;
       }
 
-      // First save — create a new trip
       const id = await tripsApi.saveTrip({
         token: auth.sessionToken,
         name: tripName,
@@ -239,16 +304,14 @@ export const useTripStore = defineStore("trip", () => {
     const raw = await tripsApi.getTrip(auth.sessionToken, tripId);
     if (!raw) return false;
 
-    // Restore store state from saved trip
     destinationInput.value = raw.destination ?? "";
     destinationInfo.value = raw.destinationInfo;
     allCards.value = raw.pinnedCards ?? [];
     pinnedIds.value = new Set((raw.pinnedCards ?? []).map((c: any) => c.id));
-    activeFilter.value = "all";
+    activeFilter.value = "restaurant";
     visibleCount.value = PAGE_SIZE;
     chatHistory.value = raw.chatHistory ?? [];
 
-    // Reconstruct chat messages from history so Wander's replies are visible
     chatMessages.value = (raw.chatHistory ?? []).map(
       (m: { role: string; content: string }, i: number) => ({
         id: `loaded-${i}`,
@@ -261,6 +324,7 @@ export const useTripStore = defineStore("trip", () => {
     savedTripId.value = tripId;
     savedTripName.value = raw.name ?? null;
     step.value = 3;
+
     return true;
   }
 
@@ -270,8 +334,11 @@ export const useTripStore = defineStore("trip", () => {
     destinationInfo.value = null;
     allCards.value = [];
     pinnedIds.value = new Set();
-    activeFilter.value = "all";
+    activeFilter.value = "restaurant";
     visibleCount.value = PAGE_SIZE;
+    loadedCategories.value = new Set();
+    isLoadingCategory.value = false;
+    categoryOffsets.value = {};
     chatMessages.value = [];
     chatHistory.value = [];
     savedTripId.value = null;
@@ -284,7 +351,8 @@ export const useTripStore = defineStore("trip", () => {
     // state
     step, destinationInput, isEnriching, enrichError,
     destinationInfo, allCards, pinnedIds, activeFilter,
-    visibleCount, isLoadingMore, chatMessages, isChatting,
+    visibleCount, isLoadingMore, isLoadingCategory, loadedCategories,
+    chatMessages, isChatting,
     isSaving, savedTripId, savedTripName, pinJustAdded,
     // computed
     filteredCards, displayedCards, pinnedCards, hasMoreToShow,

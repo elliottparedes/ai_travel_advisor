@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from "vue";
-import { useRouter } from "vue-router";
 import { useTripStore } from "../../stores/tripStore";
 import { useFlightsStore } from "../../stores/flightsStore";
 import { CARD_GRADIENTS, CARD_ICONS } from "../../types/trips";
@@ -11,7 +10,6 @@ import { getNearestAirport } from "../../api/tripsApi";
 
 const store = useTripStore();
 const flights = useFlightsStore();
-const router = useRouter();
 
 // Use the saved trip name when returning to an existing trip
 const tripName = ref(store.savedTripName ?? `Trip to ${store.destinationInfo?.city ?? "Unknown"}`);
@@ -49,7 +47,7 @@ async function handleSave() {
   if (id) {
     saveMsg.value = isUpdate ? "Trip updated! ✓" : "Trip saved! ✓";
     store.savedTripName = tripName.value;
-    setTimeout(() => router.push("/trips"), 1200);
+    setTimeout(() => { saveMsg.value = ""; }, 3000);
   }
 }
 </script>

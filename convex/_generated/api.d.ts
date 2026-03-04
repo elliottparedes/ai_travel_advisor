@@ -10,6 +10,7 @@
 
 import type * as authActions from "../authActions.js";
 import type * as authData from "../authData.js";
+import type * as cache from "../cache.js";
 import type * as flights from "../flights.js";
 import type * as providers_geocoding from "../providers/geocoding.js";
 import type * as providers_images from "../providers/images.js";
@@ -26,6 +27,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   authActions: typeof authActions;
   authData: typeof authData;
+  cache: typeof cache;
   flights: typeof flights;
   "providers/geocoding": typeof providers_geocoding;
   "providers/images": typeof providers_images;

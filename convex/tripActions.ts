@@ -1,9 +1,10 @@
 "use node";
 
 import { action } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { geocodingProvider } from "./providers/geocoding";
-import { placesProvider, type PlaceType, type RawPlace, type AllPlacesResult } from "./providers/places";
+import { placesProvider, type PlaceType, type RawPlace, type AllPlacesResult, type PlaceDetails, fsqToRawPlace } from "./providers/places";
 import { imageProvider } from "./providers/images";
 
 // ── OpenRouter helper ─────────────────────────────────────────────────────────
@@ -50,6 +51,7 @@ function uid(): string {
 
 export interface DiscoveryCard {
   id: string;
+  fsqId?: string;         // FSQ place ID — used to fetch photos
   type: string;
   title: string;
   description: string;
@@ -78,7 +80,6 @@ export interface DestinationInfo {
 
 export interface EnrichResult {
   info: DestinationInfo;
-  cards: DiscoveryCard[];
 }
 
 // ── Card building helpers ─────────────────────────────────────────────────────
@@ -89,17 +90,21 @@ function buildDescription(place: RawPlace, type: PlaceType, city: string): strin
     : `in ${city}`;
   switch (type) {
     case "restaurant":
-      return place.cuisine
-        ? `A ${place.cuisine} restaurant ${loc}.`
-        : `A local dining spot ${loc}.`;
+      return place.cuisine ? `A ${place.cuisine} restaurant ${loc}.` : `A local dining spot ${loc}.`;
     case "landmark":
-      return place.category
-        ? `A ${place.category} ${loc}.`
-        : `A notable attraction ${loc}.`;
+      return place.category ? `A ${place.category} ${loc}.` : `A notable attraction ${loc}.`;
     case "nightlife":
       return place.vibe ? `A ${place.vibe} ${loc}.` : `A nightlife venue ${loc}.`;
     case "hotel":
       return `Accommodation ${loc}.`;
+    case "coffee":
+      return place.category ? `A ${place.category.toLowerCase()} ${loc}.` : `A café ${loc}.`;
+    case "outdoor":
+      return place.category ? `${place.category} ${loc}.` : `An outdoor space ${loc}.`;
+    case "shopping":
+      return place.category ? `A ${place.category.toLowerCase()} ${loc}.` : `A shopping destination ${loc}.`;
+    case "entertainment":
+      return place.category ? `A ${place.category.toLowerCase()} ${loc}.` : `An entertainment venue ${loc}.`;
     default:
       return `Located ${loc}.`;
   }
@@ -108,6 +113,7 @@ function buildDescription(place: RawPlace, type: PlaceType, city: string): strin
 function rawToCard(place: RawPlace, type: PlaceType, city: string, index: number): DiscoveryCard {
   return {
     id: `${type}-${index}-${uid()}`,
+    fsqId: place.placeId,
     type,
     title: place.name,
     description: buildDescription(place, type, city),
@@ -123,16 +129,14 @@ function rawToCard(place: RawPlace, type: PlaceType, city: string, index: number
   };
 }
 
-function settled<T>(result: PromiseSettledResult<T>, fallback: T): T {
-  return result.status === "fulfilled" ? result.value : fallback;
-}
-
 // ── enrichDestination ─────────────────────────────────────────────────────────
+// Only runs geocoding + AI description. No FSQ calls.
+// Cards are fetched lazily per-tab via fetchCategoryPlaces.
 
 export const enrichDestination = action({
   args: { destination: v.string() },
-  handler: async (_ctx, args): Promise<EnrichResult> => {
-    // 1. Real geocoding via Nominatim
+  handler: async (ctx, args): Promise<EnrichResult> => {
+    // 1. Geocode the destination
     const geo = await geocodingProvider.geocode(args.destination);
     if (!geo) {
       throw new Error(
@@ -140,193 +144,267 @@ export const enrichDestination = action({
       );
     }
 
-    // 2. ONE combined Overpass query + AI info in parallel
-    //    (Overpass caps at 2 simultaneous connections — combining avoids rate-limiting)
-    const aiPrompt = `Destination: "${geo.city}, ${geo.country}" (lat: ${geo.lat}, lng: ${geo.lng})
+    // 2. Check destination cache
+    const cacheKey = `${geo.city.toLowerCase()},${geo.country.toLowerCase()}`;
+    const cached = await ctx.runQuery(internal.cache.getDestinationCache, { key: cacheKey });
+    if (cached) return { info: cached };
+
+    // 3. AI destination info
+    const aiPrompt = `Destination: "${geo.city}, ${geo.country}"
 
 Return ONLY valid JSON (no markdown):
 {
   "description": "2-3 engaging sentences about this destination",
   "bestTime": "e.g. April to June",
-  "highlights": ["5 unique cultural/experiential highlights"],
-  "airbnbs": [
-    {
-      "id": "airbnb-1",
-      "type": "airbnb",
-      "title": "Cozy Studio in [Neighborhood]",
-      "description": "2 sentence description of the space",
-      "pricePerNight": "$120/night",
-      "neighborhood": "Neighborhood Name",
-      "rating": 4.8,
-      "tags": ["wifi", "kitchen", "city views"],
-      "lat": ${geo.lat + 0.004},
-      "lng": ${geo.lng + 0.003}
-    }
-  ]
-}
-Generate exactly 5 airbnb listings. Use varied home types in titles (studio, loft, apartment, cottage, penthouse). Use realistic prices ($60–$350/night). Spread coordinates within 0.02° of lat/lng.`;
+  "highlights": ["5 unique cultural/experiential highlights"]
+}`;
 
-    const [placesR, aiRaw] = await Promise.allSettled([
-      placesProvider.searchAll({ lat: geo.lat, lng: geo.lng }),
-      callOpenRouter([{ role: "user", content: aiPrompt }], { jsonMode: true }),
-    ]);
+    let aiData: { description?: string; bestTime?: string; highlights?: string[] } = {};
+    try {
+      const aiRaw = await callOpenRouter([{ role: "user", content: aiPrompt }], { jsonMode: true });
+      aiData = extractJSON(aiRaw) as typeof aiData;
+    } catch { /* keep empty defaults */ }
 
-    // 3. Parse AI result
-    let aiData: {
-      description?: string;
-      bestTime?: string;
-      highlights?: string[];
-      airbnbs?: DiscoveryCard[];
-    } = {};
-    if (aiRaw.status === "fulfilled") {
-      try {
-        aiData = extractJSON(aiRaw.value) as typeof aiData;
-      } catch { /* keep empty defaults */ }
-    }
-
-    // 4. Convert OSM results → DiscoveryCards
-    const places: AllPlacesResult = settled(placesR, {
-      restaurant: [], landmark: [], nightlife: [], hotel: [],
-    });
-
-    const cards: DiscoveryCard[] = [
-      ...places.restaurant.map((p, i) => rawToCard(p, "restaurant", geo.city, i)),
-      ...places.landmark.map((p, i) => rawToCard(p, "landmark", geo.city, i)),
-      ...places.nightlife.map((p, i) => rawToCard(p, "nightlife", geo.city, i)),
-      ...places.hotel.map((p, i) => rawToCard(p, "hotel", geo.city, i)),
-      ...(aiData.airbnbs ?? []).map((c, i) => ({
-        ...c,
-        id: `airbnb-${i}-${uid()}`,
-        type: "airbnb",
-      })),
-    ];
-
-    return {
-      info: {
-        city: geo.city,
-        country: geo.country,
-        description: aiData.description ?? `${geo.city} is a wonderful destination worth exploring.`,
-        bestTime: aiData.bestTime,
-        highlights: aiData.highlights ?? [],
-        lat: geo.lat,
-        lng: geo.lng,
-      },
-      cards,
+    const info: DestinationInfo = {
+      city: geo.city,
+      country: geo.country,
+      description: aiData.description ?? `${geo.city} is a wonderful destination worth exploring.`,
+      bestTime: aiData.bestTime,
+      highlights: aiData.highlights ?? [],
+      lat: geo.lat,
+      lng: geo.lng,
     };
+
+    // 4. Persist to cache (silent failure — don't block the response)
+    await ctx.runMutation(internal.cache.upsertDestinationCache, { key: cacheKey, ...info }).catch(() => {});
+
+    return { info };
   },
 });
 
+// ── Image cache version ───────────────────────────────────────────────────────
+// Bump to invalidate all cached image URLs (e.g. after switching image providers).
+// Old entries with different prefix are silently ignored — no DB cleanup needed.
+const IMG_V = "v4:";
+
 // ── fetchCardImages ───────────────────────────────────────────────────────────
-// Called separately after cards are displayed so the initial load stays fast.
-// Returns a map of cardId → image URL for successful fetches.
+// Returns a map of cardId → [url, fallback1, fallback2].
+// Multiple URLs per card so the client can retry on image load failure.
 
 export const fetchCardImages = action({
   args: {
-    queries: v.array(v.object({ id: v.string(), query: v.string() })),
+    queries: v.array(v.object({
+      id: v.string(),
+      query: v.string(),
+      fsqId: v.optional(v.string()),
+    })),
   },
-  handler: async (_ctx, args): Promise<Record<string, string>> => {
-    const results = await Promise.allSettled(
-      args.queries.map(async ({ id, query }) => {
-        const image = await imageProvider.search(query);
-        return { id, image };
-      }),
-    );
+  handler: async (ctx, args): Promise<Record<string, string[]>> => {
+    // Deduplicate query strings before hitting cache or API
+    const uniqueQueries = [...new Set(args.queries.map(q => q.query))];
 
-    const map: Record<string, string> = {};
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value.image) {
-        map[r.value.id] = r.value.image;
+    // Check cache — versioned keys so old provider URLs (e.g. Brave) are ignored.
+    // getImageCacheMany returns an array (not Record) to avoid non-ASCII field name errors.
+    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, {
+      queries: uniqueQueries.map(q => IMG_V + q),
+    });
+    // Build raw-query → urls map (strip version prefix)
+    const cached: Record<string, string[]> = {};
+    for (const h of cachedArr) {
+      cached[h.query.slice(IMG_V.length)] = h.urls;
+    }
+
+    // Fetch only cache misses — get 6 candidates per query, HEAD-verify, keep 3 working ones
+    const missQueries = uniqueQueries.filter(q => !cached[q]);
+    const freshMap: Record<string, string[]> = {};
+    if (missQueries.length > 0) {
+      const results = await Promise.allSettled(
+        missQueries.map(async query => {
+          const candidates = await imageProvider.searchMultiple(query, 6);
+          // HEAD-check all in parallel (no Referer — same as referrerpolicy="no-referrer" in browser)
+          const checks = await Promise.allSettled(
+            candidates.map(url =>
+              fetch(url, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(3000) })
+                .then(r => r.ok)
+                .catch(() => false)
+            )
+          );
+          const verified = candidates.filter((_, i) => checks[i].status === "fulfilled" && (checks[i] as PromiseFulfilledResult<boolean>).value);
+          // Use verified URLs if any; fall back to unverified so card isn't imageless
+          const images = (verified.length > 0 ? verified : candidates).slice(0, 3);
+          return { query, images };
+        }),
+      );
+
+      const toCache: { query: string; urls: string[] }[] = [];
+      for (const r of results) {
+        if (r.status === "fulfilled" && r.value.images.length > 0) {
+          freshMap[r.value.query] = r.value.images;
+          toCache.push({ query: IMG_V + r.value.query, urls: r.value.images });
+        }
       }
+      if (toCache.length > 0) {
+        await ctx.runMutation(internal.cache.upsertImageCacheMany, { entries: toCache }).catch(() => {});
+      }
+    }
+
+    // Build id → urls[] result map from cached + fresh results
+    const map: Record<string, string[]> = {};
+    for (const { id, query } of args.queries) {
+      const urls = cached[query] ?? freshMap[query];
+      if (urls?.length) map[id] = urls;
     }
     return map;
   },
 });
 
-// ── generateMoreCards ─────────────────────────────────────────────────────────
+// ── fetchPlacePhotos ──────────────────────────────────────────────────────────
+// Returns up to N photo URLs for the detail panel.
 
-export const generateMoreCards = action({
-  args: {
-    city: v.string(),
-    country: v.string(),
-    category: v.string(),
-    existingTitles: v.array(v.string()),
-    cityLat: v.optional(v.number()),
-    cityLng: v.optional(v.number()),
+export const fetchPlacePhotos = action({
+  args: { query: v.string() },
+  handler: async (ctx, { query }): Promise<string[]> => {
+    const cacheKey = `${IMG_V}photos:${query}`;
+    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, { queries: [cacheKey] });
+    const cachedHit = cachedArr.find(h => h.query === cacheKey);
+    if (cachedHit?.urls.length) return cachedHit.urls;
+
+    const urls = await imageProvider.searchMultiple(`${query} restaurant bar cafe photos`, 5);
+    if (urls.length > 0) {
+      await ctx.runMutation(internal.cache.upsertImageCacheMany, { entries: [{ query: cacheKey, urls }] }).catch(() => {});
+    }
+    return urls;
   },
-  handler: async (_ctx, args): Promise<DiscoveryCard[]> => {
-    // "all" filter maps to landmark for Overpass
-    const placeType = (
-      args.category === "attraction" ? "landmark" : args.category
-    ) as PlaceType;
+});
 
-    // Airbnbs aren't in OSM — always use AI
-    if (placeType !== "airbnb" && args.cityLat && args.cityLng) {
-      const raw = await placesProvider
-        .search({
-          lat: args.cityLat,
-          lng: args.cityLng,
-          type: placeType,
-          radiusMeters: 10000, // wider than initial 5 km to find new results
-          limit: 30,
-        })
-        .catch(() => [] as RawPlace[]);
+// ── getPlaceDetails ───────────────────────────────────────────────────────────
 
-      const fresh = raw
-        .filter((p) => !args.existingTitles.includes(p.name))
-        .slice(0, 8);
-
-      if (fresh.length >= 4) {
-        return fresh.map((p, i) => rawToCard(p, placeType, args.city, i));
-      }
-      // Fall through to AI if Overpass didn't return enough new results
+export const getPlaceDetails = action({
+  args: { fsqId: v.string() },
+  handler: async (ctx, { fsqId }): Promise<PlaceDetails> => {
+    // Check cache first
+    const cacheKey = `${IMG_V}details:${fsqId}`;
+    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, { queries: [cacheKey] });
+    const cachedHit = cachedArr.find(h => h.query === cacheKey);
+    if (cachedHit?.urls.length) {
+      try { return JSON.parse(cachedHit.urls[0]); } catch { /* fall through */ }
     }
 
-    // AI fallback (always used for airbnbs, and as fallback for other types)
-    const typeHints: Record<string, string> = {
-      restaurant: 'Include "cuisine", "priceRange" ($-$$$$), "rating", "neighborhood", "tags".',
-      landmark: 'Include "category" (Museum/Historic Site/etc), "rating", "neighborhood", "tags".',
-      nightlife: 'Include "vibe" (e.g. rooftop bar), "priceRange", "rating", "neighborhood", "tags".',
-      hotel: 'Include "pricePerNight" (e.g. "$200/night"), "rating", "neighborhood", "tags".',
-      airbnb:
-        'Include home type in title (e.g. "Cozy Studio in ..."). Include "pricePerNight", "rating", "neighborhood", "tags".',
-    };
+    const details = await placesProvider.getPlaceDetails(fsqId);
 
-    const prompt = `You are a travel expert. Generate 8 more ${args.category} options in ${args.city}, ${args.country}.
+    // Cache the result (reuse image cache table — stores arbitrary string arrays)
+    if (details.website || details.tel) {
+      await ctx.runMutation(internal.cache.upsertImageCacheMany, {
+        entries: [{ query: cacheKey, urls: [JSON.stringify(details)] }],
+      }).catch(() => {});
+    }
 
-Do NOT repeat these: ${args.existingTitles.slice(0, 20).join(", ")}.
+    return details;
+  },
+});
 
-Return ONLY a valid JSON array (no markdown):
-[
-  {
-    "id": "unique-slug",
-    "type": "${args.category}",
-    "title": "Name",
-    "description": "2 sentence description",
-    "tags": ["tag1", "tag2"],
-    "lat": ${(args.cityLat ?? 0) + (Math.random() - 0.5) * 0.04},
-    "lng": ${(args.cityLng ?? 0) + (Math.random() - 0.5) * 0.04}
-  }
-]
+// ── fetchCategoryPlaces ───────────────────────────────────────────────────────
+// Lazy per-tab loading. "all" = proximity + classify. Specific type = targeted query.
 
-${typeHints[args.category] ?? ""}
-Use realistic coordinates near the city center. Make details specific to ${args.city}.`;
 
-    const raw = await callOpenRouter([{ role: "user", content: prompt }]);
+// For nightlife, run 4 focused parallel queries instead of one broad query.
+// FSQ text search matches category names, so "bar" returns Bar/Cocktail Bar/Dive Bar/etc.
+// Each query fetches 1 page of 50; combined + deduped = 200 raw → ~100 actual nightlife venues.
+// 4 targeted queries cover the full taxonomy:
+// "bar"        → Bar + all sub-bars (Cocktail, Dive, Gay, Karaoke, Lounge, Sports, Rooftop, etc.)
+// "nightclub"  → Night Club
+// "brewery"    → Brewery + Winery (both appear in results)
+// "dance club" → Country Dance Club, Dance Hall, Salsa Club (not covered by "bar")
+const NIGHTLIFE_QUERIES = ["bar", "nightclub", "brewery", "dance club"];
 
-    const m = raw.match(/\[[\s\S]*\]/);
-    if (!m) return [];
+// Coffee uses multiple focused queries to cover the full taxonomy:
+// "coffee"       → Coffee Shop, Espresso Bar, Coffee Roaster
+// "cafe"         → Café, Bakery Café, Internet Café
+// "espresso bar" → Espresso Bar (not always caught by "coffee" text search)
+const COFFEE_QUERIES = ["coffee", "cafe", "espresso bar"];
 
-    const cards = JSON.parse(m[0]) as DiscoveryCard[];
-    return cards.map((c, i) => ({
-      ...c,
-      id: `${args.category}-more-${i}-${uid()}`,
-    }));
+// Single text queries for other categories (reliable enough with one broad query).
+const CATEGORY_QUERIES: Record<string, string> = {
+  restaurant:    "restaurant",
+  landmark:      "museum landmark historic monument",
+  outdoor:       "park outdoor nature",
+  shopping:      "boutique shopping mall store",
+  entertainment: "arcade cinema bowling theater",
+  hotel:         "hotel",
+};
+
+// These tabs use strictType=true (require positive classifyType match, drop everything else).
+const STRICT_TYPE_TABS = new Set(["nightlife", "coffee"]);
+
+export const fetchCategoryPlaces = action({
+  args: {
+    lat: v.number(),
+    lng: v.number(),
+    city: v.string(),
+    category: v.string(),
+    offset: v.number(),
+    existingTitles: v.array(v.string()),
+  },
+  handler: async (_ctx, args): Promise<DiscoveryCard[]> => {
+    if (!args.lat || !args.lng) return [];
+    const existingSet = new Set(args.existingTitles);
+
+    if (args.category === "all") {
+      const result = await placesProvider.searchProximity({
+        lat: args.lat, lng: args.lng, offset: args.offset,
+      }).catch(() => null);
+      if (!result) return [];
+
+      const cards: DiscoveryCard[] = [];
+      const types: PlaceType[] = ["restaurant", "landmark", "nightlife", "hotel", "coffee", "outdoor", "shopping", "entertainment"];
+      for (const type of types) {
+        for (const p of result[type]) {
+          if (!existingSet.has(p.name)) cards.push(rawToCard(p, type, args.city, cards.length));
+        }
+      }
+      return cards;
+    }
+
+    const type = args.category as PlaceType;
+    // Expand radius as the user loads deeper: 15km → 25km → 35km → 50km (cap)
+    const radiusMeters = Math.min(15000 + Math.floor(args.offset / 100) * 10000, 50000);
+
+    // Nightlife and coffee use precise FSQ category IDs to avoid text-search contamination.
+    // All other tabs use text query search.
+    let searchOpts: Parameters<typeof placesProvider.search>[0];
+    if (args.category === "nightlife") {
+      searchOpts = {
+        lat: args.lat, lng: args.lng, type,
+        queries: NIGHTLIFE_QUERIES,
+        radiusMeters, offset: args.offset, strictType: true,
+      };
+    } else if (args.category === "coffee") {
+      searchOpts = {
+        lat: args.lat, lng: args.lng, type,
+        queries: COFFEE_QUERIES,
+        radiusMeters, offset: args.offset, strictType: true,
+      };
+    } else {
+      const query = CATEGORY_QUERIES[args.category];
+      if (!query) return [];
+      searchOpts = {
+        lat: args.lat, lng: args.lng, type, query, radiusMeters,
+        offset: args.offset, strictType: STRICT_TYPE_TABS.has(args.category),
+      };
+    }
+
+    const places = await placesProvider
+      .search(searchOpts)
+      .catch(() => [] as RawPlace[]);
+
+    return places
+      .filter(p => !existingSet.has(p.name))
+      .slice(0, 60)
+      .map((p, i) => rawToCard(p, type, args.city, i));
   },
 });
 
 // ── getNearestAirport ─────────────────────────────────────────────────────────
-// Uses AI to reliably identify the nearest major commercial airport IATA code.
-// Overpass/OSM iata tags are sparsely populated, so AI is more dependable here.
 
 export const getNearestAirport = action({
   args: { city: v.string(), country: v.string() },
@@ -339,7 +417,6 @@ export const getNearestAirport = action({
         },
       ], { model: "openai/gpt-4o-mini" });
 
-      // Extract the first 3-letter uppercase code from the response
       const match = raw.trim().match(/\b([A-Z]{3})\b/);
       return match?.[1] ?? null;
     } catch {
@@ -379,7 +456,6 @@ Guidelines:
       { role: "user", content: args.userMessage },
     ];
 
-    // perplexity/sonar has live web search built in via OpenRouter
     return await callOpenRouter(messages, { model: "perplexity/sonar" });
   },
 });

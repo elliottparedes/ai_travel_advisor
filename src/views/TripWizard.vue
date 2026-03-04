@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { ref, onMounted } from "vue";
+import { useRouter, useRoute } from "vue-router";
 import { useTripStore } from "../stores/tripStore";
 import DestinationStep from "../components/trip/DestinationStep.vue";
 import ExploreStep from "../components/trip/ExploreStep.vue";
@@ -8,7 +8,16 @@ import BoardStep from "../components/trip/BoardStep.vue";
 
 const store = useTripStore();
 const router = useRouter();
+const route = useRoute();
 const showLeaveModal = ref(false);
+
+// On refresh: if ?id= is in the URL and we have no loaded trip, reload it
+onMounted(async () => {
+  const tripId = route.query.id as string | undefined;
+  if (tripId && !store.savedTripId) {
+    await store.loadSavedTrip(tripId);
+  }
+});
 
 function handleBackToTrips() {
   const unsaved = store.pinnedCards.length > 0 && !store.savedTripId;

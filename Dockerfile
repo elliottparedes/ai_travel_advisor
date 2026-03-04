@@ -11,11 +11,16 @@ RUN npm ci
 COPY . .
 
 # VITE_CONVEX_URL is baked into the bundle at build time.
-# Pass it via --build-arg in Coolify (or docker build).
+# CONVEX_DEPLOY_KEY is used to deploy Convex functions to production.
+# Pass both via Build Args in Coolify (Settings → Build Args).
 ARG VITE_CONVEX_URL
 ENV VITE_CONVEX_URL=$VITE_CONVEX_URL
 
-RUN npm run build-only
+ARG CONVEX_DEPLOY_KEY
+ENV CONVEX_DEPLOY_KEY=$CONVEX_DEPLOY_KEY
+
+# Deploy Convex functions to prod, then build the frontend
+RUN npx convex deploy && npm run build-only
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────
 FROM nginx:stable-alpine

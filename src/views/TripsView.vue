@@ -13,7 +13,7 @@ const tripStore = useTripStore();
 const trips = ref<SavedTrip[]>([]);
 const isLoading = ref(true);
 const deletingId = ref<string | null>(null);
-const heroImages = ref<Record<string, string>>({});
+const heroImages = ref<Record<string, string[]>>({});
 const confirmDeleteId = ref<string | null>(null);
 
 onMounted(async () => {
@@ -49,7 +49,7 @@ function startNewTrip() {
 
 async function openTrip(tripId: string) {
   const ok = await tripStore.loadSavedTrip(tripId);
-  if (ok) router.push("/trips/new");
+  if (ok) router.push(`/trips/new?id=${tripId}`);
 }
 
 async function confirmDelete() {
@@ -116,19 +116,34 @@ function formatDate(ts: number): string {
         class="trip-card"
         @click="openTrip(trip.id)"
       >
-        <!-- Hero: city photo or gradient fallback -->
-        <div
-          class="trip-card__hero"
-          :style="heroImages[trip.id]
-            ? { backgroundImage: `url(${heroImages[trip.id]})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-            : {}"
-        >
+        <!-- Hero: pinned places collage → cityscape → gradient fallback -->
+        <div class="trip-card__hero">
+          <!-- Collage of pinned place photos -->
+          <div
+            v-if="trip.pinnedImages?.length"
+            :class="['trip-card__collage', `trip-card__collage--${Math.min(trip.pinnedImages.length, 4)}`]"
+          >
+            <img
+              v-for="(url, i) in trip.pinnedImages.slice(0, 4)"
+              :key="i"
+              :src="url"
+              referrerpolicy="no-referrer"
+              class="collage-img"
+              @error="(e) => ((e.target as HTMLImageElement).style.display = 'none')"
+            />
+          </div>
+          <!-- Cityscape fallback -->
+          <div
+            v-else-if="heroImages[trip.id]?.[0]"
+            class="trip-card__cityscape"
+            :style="{ backgroundImage: `url(${heroImages[trip.id][0]})`, backgroundSize: 'cover', backgroundPosition: 'center' }"
+          />
           <div class="trip-card__scrim" />
           <div class="trip-card__overlay">
             <h2 class="trip-card__name">{{ trip.name }}</h2>
             <p class="trip-card__dest">{{ trip.city }}, {{ trip.country }}</p>
           </div>
-          <div v-if="!heroImages[trip.id]" class="trip-card__emoji">🗺️</div>
+          <div v-if="!trip.pinnedImages?.length && !heroImages[trip.id]?.[0]" class="trip-card__emoji">🗺️</div>
         </div>
 
         <div class="trip-card__body">
@@ -358,6 +373,33 @@ function formatDate(ts: number): string {
   font-size: 2.4rem;
   opacity: 0.35;
   pointer-events: none;
+}
+
+.trip-card__cityscape {
+  position: absolute;
+  inset: 0;
+}
+
+.trip-card__collage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.trip-card__collage--1 { grid-template-columns: 1fr; }
+.trip-card__collage--2 { grid-template-columns: 1fr 1fr; }
+.trip-card__collage--3 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.trip-card__collage--4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+/* First image spans both rows in the 3-photo layout */
+.trip-card__collage--3 .collage-img:first-child { grid-row: 1 / span 2; }
+
+.collage-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .trip-card {

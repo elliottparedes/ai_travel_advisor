@@ -35,6 +35,8 @@ const cardV = v.object({
   lat: v.optional(v.number()),
   lng: v.optional(v.number()),
   image: v.optional(v.string()),
+  imageFallbacks: v.optional(v.array(v.string())),
+  fsqId: v.optional(v.string()),
 });
 
 // ── Mutations ─────────────────────────────────────────────────────────────────
@@ -139,6 +141,10 @@ export const listTrips = query({
       city: t.destinationInfo.city,
       country: t.destinationInfo.country,
       pinnedCount: t.pinnedCards.length,
+      pinnedImages: t.pinnedCards
+        .filter((c: any) => c.image)
+        .slice(0, 4)
+        .map((c: any) => c.image as string),
       createdAt: t.createdAt,
     }));
   },
