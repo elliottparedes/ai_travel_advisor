@@ -4,8 +4,7 @@ import { useTripStore } from "../../stores/tripStore";
 import { useListStore } from "../../stores/listStore";
 import { useAuthStore } from "../../stores/authStore";
 import { CARD_FILTERS } from "../../types/trips";
-import type { DiscoveryCard as DiscoveryCardType, PlaceDetails } from "../../types/trips";
-import * as tripsApi from "../../api/tripsApi";
+import { usePlaceDetail } from "../../composables/usePlaceDetail";
 import DiscoveryCard from "./DiscoveryCard.vue";
 import SkeletonCard from "./SkeletonCard.vue";
 import PlaceDetailPanel from "./PlaceDetailPanel.vue";
@@ -50,24 +49,7 @@ watch(
 const showMap = ref(false);
 
 // ── Place detail panel ───────────────────────────────────────────────────────
-const selectedCard = ref<DiscoveryCardType | null>(null);
-const placeDetails = ref<PlaceDetails | null>(null);
-const isLoadingDetails = ref(false);
-
-async function openCard(card: DiscoveryCardType) {
-  selectedCard.value = card;
-  placeDetails.value = null;
-  if (card.fsqId) {
-    isLoadingDetails.value = true;
-    try {
-      placeDetails.value = await tripsApi.getPlaceDetails(card.fsqId);
-    } catch {
-      placeDetails.value = null;
-    } finally {
-      isLoadingDetails.value = false;
-    }
-  }
-}
+const { selectedCard, placeDetails, isLoadingDetails, openCard } = usePlaceDetail();
 </script>
 
 <template>

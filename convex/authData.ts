@@ -6,6 +6,7 @@ import {
 } from "./_generated/server";
 import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
+import { requireUser } from "./utils/session";
 
 // ── Internal (called by node actions) ────────────────────────────────────────
 
@@ -90,18 +91,10 @@ export const updateProfile = mutation({
   handler: async (ctx, args) => {
     if (!args.displayName.trim()) throw new Error("Display name cannot be empty.");
 
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.token))
-      .unique();
+    const userId = await requireUser(ctx, args.token);
+    await ctx.db.patch(userId, { displayName: args.displayName.trim() });
 
-    if (!session || session.expiresAt < Date.now()) {
-      throw new Error("Session expired. Please sign in again.");
-    }
-
-    await ctx.db.patch(session.userId, { displayName: args.displayName.trim() });
-
-    const user = await ctx.db.get(session.userId);
+    const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found.");
 
     const avatarUrl = user.avatarStorageId
@@ -121,13 +114,7 @@ export const updateProfile = mutation({
 export const generateAvatarUploadUrl = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.token))
-      .unique();
-    if (!session || session.expiresAt < Date.now()) {
-      throw new Error("Session expired.");
-    }
+    await requireUser(ctx, args.token);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -135,14 +122,8 @@ export const generateAvatarUploadUrl = mutation({
 export const saveAvatar = mutation({
   args: { token: v.string(), storageId: v.id("_storage") },
   handler: async (ctx, args) => {
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.token))
-      .unique();
-    if (!session || session.expiresAt < Date.now()) {
-      throw new Error("Session expired.");
-    }
-    await ctx.db.patch(session.userId, { avatarStorageId: args.storageId });
+    const userId = await requireUser(ctx, args.token);
+    await ctx.db.patch(userId, { avatarStorageId: args.storageId });
     const avatarUrl = await ctx.storage.getUrl(args.storageId);
     return avatarUrl;
   },

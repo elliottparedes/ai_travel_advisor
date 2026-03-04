@@ -19,6 +19,7 @@ import type * as providers_places from "../providers/places.js";
 import type * as reviewsData from "../reviewsData.js";
 import type * as tripActions from "../tripActions.js";
 import type * as tripData from "../tripData.js";
+import type * as utils_session from "../utils/session.js";
 
 import type {
   ApiFromModules,
@@ -38,6 +39,7 @@ declare const fullApi: ApiFromModules<{
   reviewsData: typeof reviewsData;
   tripActions: typeof tripActions;
   tripData: typeof tripData;
+  "utils/session": typeof utils_session;
 }>;
 
 /**

@@ -64,9 +64,6 @@ export interface PlacesProvider {
 
   // Fetch detailed info for a single place by FSQ ID
   getPlaceDetails(fsqId: string): Promise<PlaceDetails>;
-
-  // Fetch user-uploaded photos for a place (guaranteed to be the exact venue)
-  getPhotos(fsqId: string, limit: number): Promise<string[]>;
 }
 
 // ── Foursquare Places API ─────────────────────────────────────────────────────
@@ -260,24 +257,6 @@ const foursquare: PlacesProvider = {
     };
   },
 
-  // Fetch user-uploaded photos for a place — exact venue match, no guessing
-  async getPhotos(fsqId: string, limit: number): Promise<string[]> {
-    const res = await fetch(
-      `${FSQ_PLACE}/${fsqId}/photos?limit=${limit}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.FOURSQUARE_API_KEY ?? ""}`,
-          "X-Places-Api-Version": "2025-06-17",
-          Accept: "application/json",
-        },
-      },
-    );
-    if (!res.ok) return [];
-    const photos: any[] = await res.json();
-    return photos
-      .filter((p: any) => p.prefix && p.suffix)
-      .map((p: any) => `${p.prefix}800x600${p.suffix}`);
-  },
 };
 
 export const placesProvider: PlacesProvider = foursquare;

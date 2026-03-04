@@ -4,7 +4,7 @@ import { action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { geocodingProvider } from "./providers/geocoding";
-import { placesProvider, type PlaceType, type RawPlace, type AllPlacesResult, type PlaceDetails, fsqToRawPlace } from "./providers/places";
+import { placesProvider, type PlaceType, type RawPlace, type AllPlacesResult, type PlaceDetails } from "./providers/places";
 import { imageProvider } from "./providers/images";
 
 // ── OpenRouter helper ─────────────────────────────────────────────────────────
@@ -196,55 +196,22 @@ export const fetchCardImages = action({
     queries: v.array(v.object({
       id: v.string(),
       query: v.string(),
-      fsqId: v.optional(v.string()),
     })),
   },
   handler: async (ctx, args): Promise<Record<string, string[]>> => {
-    // Split into FSQ-backed (have fsqId) and DDG-only queries
-    const fsqItems  = args.queries.filter(q => q.fsqId);
-    const ddgItems  = args.queries.filter(q => !q.fsqId);
-
-    // ── Cache keys ──
-    // FSQ items: "v4:fsq:<fsqId>", DDG items: "v4:<query>"
-    const allCacheKeys = [
-      ...fsqItems.map(q => `${IMG_V}fsq:${q.fsqId}`),
-      ...ddgItems.map(q => IMG_V + q.query),
-    ];
-    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, { queries: allCacheKeys });
+    const cacheKeys = args.queries.map(q => IMG_V + q.query);
+    const cachedArr = await ctx.runQuery(internal.cache.getImageCacheMany, { queries: cacheKeys });
     const cached: Record<string, string[]> = {};
     for (const h of cachedArr) cached[h.query.slice(IMG_V.length)] = h.urls;
 
     const toCache: { query: string; urls: string[] }[] = [];
     const freshMap: Record<string, string[]> = {};
 
-    // ── FSQ photos first (exact venue match, no guessing) ──
-    const fsqMisses = fsqItems.filter(q => !cached[`fsq:${q.fsqId}`]);
-    if (fsqMisses.length > 0) {
+    const uniqueQueries = [...new Set(args.queries.map(q => q.query))];
+    const misses = uniqueQueries.filter(q => !cached[q]);
+    if (misses.length > 0) {
       const results = await Promise.allSettled(
-        fsqMisses.map(async ({ fsqId, query }) => {
-          const photos = await placesProvider.getPhotos(fsqId!, 3).catch(() => [] as string[]);
-          return { key: `fsq:${fsqId}`, fallbackQuery: query, images: photos };
-        })
-      );
-      for (const r of results) {
-        if (r.status !== "fulfilled") continue;
-        const { key, fallbackQuery, images } = r.value;
-        if (images.length > 0) {
-          freshMap[key] = images;
-          toCache.push({ query: IMG_V + key, urls: images });
-        } else {
-          // FSQ returned no photos — fall through to DDG with this query
-          ddgItems.push({ id: fsqMisses.find(q => `fsq:${q.fsqId}` === key)!.id, query: fallbackQuery });
-        }
-      }
-    }
-
-    // ── DDG fallback for items with no fsqId or no FSQ photos ──
-    const uniqueDdgQueries = [...new Set(ddgItems.map(q => q.query))];
-    const ddgMisses = uniqueDdgQueries.filter(q => !cached[q] && !freshMap[q]);
-    if (ddgMisses.length > 0) {
-      const results = await Promise.allSettled(
-        ddgMisses.map(async query => {
+        misses.map(async query => {
           const candidates = await imageProvider.searchMultiple(query, 6);
           const checks = await Promise.allSettled(
             candidates.map(url =>
@@ -271,12 +238,9 @@ export const fetchCardImages = action({
       await ctx.runMutation(internal.cache.upsertImageCacheMany, { entries: toCache }).catch(() => {});
     }
 
-    // ── Build id → urls result map ──
     const map: Record<string, string[]> = {};
-    for (const { id, query, fsqId } of args.queries) {
-      const fsqKey = fsqId ? `fsq:${fsqId}` : null;
-      const urls = (fsqKey && (cached[fsqKey] ?? freshMap[fsqKey]))
-        || cached[query] || freshMap[query];
+    for (const { id, query } of args.queries) {
+      const urls = cached[query] || freshMap[query];
       if (urls?.length) map[id] = urls;
     }
     return map;

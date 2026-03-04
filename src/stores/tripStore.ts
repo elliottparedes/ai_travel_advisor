@@ -5,6 +5,7 @@ import * as tripsApi from "../api/tripsApi";
 import { useAuthStore } from "./authStore";
 
 const PAGE_SIZE = 24;
+const IMAGE_BATCH_SIZE = 8;
 
 const TYPE_LABEL: Record<string, string> = {
   restaurant: "restaurant", coffee: "coffee shop", hotel: "hotel",
@@ -69,6 +70,27 @@ export const useTripStore = defineStore("trip", () => {
     () => visibleCount.value < filteredCards.value.length,
   );
 
+  // ── Private: batch image loading ───────────────────────────────────────────
+  async function _patchImages(cards: DiscoveryCard[], city: string) {
+    if (cards.length === 0) return;
+    const queries = cards.map(c => ({ id: c.id, query: buildImageQuery(c, city) }));
+    const batches: { id: string; query: string }[][] = [];
+    for (let i = 0; i < queries.length; i += IMAGE_BATCH_SIZE) {
+      batches.push(queries.slice(i, i + IMAGE_BATCH_SIZE));
+    }
+    const imageMaps = await Promise.all(
+      batches.map(b => tripsApi.fetchCardImages(b).catch(() => ({} as Record<string, string[]>)))
+    );
+    const merged = Object.assign({}, ...imageMaps);
+    if (Object.keys(merged).length > 0) {
+      allCards.value = allCards.value.map(c => {
+        const urls = merged[c.id];
+        if (!urls?.length) return c;
+        return { ...c, image: urls[0], imageFallbacks: urls.slice(1) };
+      });
+    }
+  }
+
   // ── Actions ────────────────────────────────────────────────────────────────
   async function enrich() {
     if (!destinationInput.value.trim()) return;
@@ -131,24 +153,9 @@ export const useTripStore = defineStore("trip", () => {
       isLoadingCategory.value = false;
     }
 
-    // Load images in parallel batches — all batches fire at once for speed
-    if (fetchedCards.length === 0 || !destinationInfo.value?.city) return;
-    const city = destinationInfo.value.city;
-    const BATCH = 8;
-    const queries = fetchedCards.map(c => ({ id: c.id, query: buildImageQuery(c, city), fsqId: c.fsqId }));
-    const batches: { id: string; query: string; fsqId?: string }[][] = [];
-    for (let i = 0; i < queries.length; i += BATCH) batches.push(queries.slice(i, i + BATCH));
-
-    const imageMaps = await Promise.all(
-      batches.map(b => tripsApi.fetchCardImages(b).catch(() => ({} as Record<string, string[]>)))
-    );
-    const merged = Object.assign({}, ...imageMaps);
-    if (Object.keys(merged).length > 0) {
-      allCards.value = allCards.value.map(c => {
-        const urls = merged[c.id];
-        if (!urls?.length) return c;
-        return { ...c, image: urls[0], imageFallbacks: urls.slice(1) };
-      });
+    // Load images async — all batches fire at once for speed
+    if (fetchedCards.length > 0 && destinationInfo.value?.city) {
+      await _patchImages(fetchedCards, destinationInfo.value.city);
     }
   }
 
@@ -197,21 +204,7 @@ export const useTripStore = defineStore("trip", () => {
 
       // Load images in parallel batches
       if (more.length > 0) {
-        const BATCH = 8;
-        const queries = more.map(c => ({ id: c.id, query: buildImageQuery(c, city), fsqId: c.fsqId }));
-        const batches: { id: string; query: string; fsqId?: string }[][] = [];
-        for (let i = 0; i < queries.length; i += BATCH) batches.push(queries.slice(i, i + BATCH));
-        const imageMaps = await Promise.all(
-          batches.map(b => tripsApi.fetchCardImages(b).catch(() => ({} as Record<string, string[]>)))
-        );
-        const merged = Object.assign({}, ...imageMaps);
-        if (Object.keys(merged).length > 0) {
-          allCards.value = allCards.value.map(c => {
-            const urls = merged[c.id];
-            if (!urls?.length) return c;
-            return { ...c, image: urls[0], imageFallbacks: urls.slice(1) };
-          });
-        }
+        await _patchImages(more, city);
       }
     } finally {
       isLoadingMore.value = false;

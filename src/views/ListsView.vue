@@ -2,12 +2,13 @@
 import { ref, onMounted } from "vue";
 import { useListStore } from "../stores/listStore";
 import { useAuthStore } from "../stores/authStore";
-import { LIST_TEMPLATES, LIST_EMOJIS } from "../types/lists";
 import type { ListItem } from "../types/lists";
-import type { DiscoveryCard, PlaceDetails } from "../types/trips";
+import type { DiscoveryCard } from "../types/trips";
+import { usePlaceDetail } from "../composables/usePlaceDetail";
 import ListCard from "../components/list/ListCard.vue";
 import PlaceDetailPanel from "../components/trip/PlaceDetailPanel.vue";
-import * as tripsApi from "../api/tripsApi";
+import ConfirmModal from "../components/common/ConfirmModal.vue";
+import NewListModal from "../components/list/NewListModal.vue";
 
 const listStore = useListStore();
 const auth = useAuthStore();
@@ -25,31 +26,6 @@ function toggleExpanded(id: string) {
 
 // ── New list modal ────────────────────────────────────────────────────────────
 const showNewModal = ref(false);
-const newName = ref("");
-const newEmoji = ref("⭐");
-const isCreating = ref(false);
-
-function openNewModal() {
-  newName.value = "";
-  newEmoji.value = "⭐";
-  showNewModal.value = true;
-}
-
-function pickTemplate(t: { emoji: string; name: string }) {
-  newEmoji.value = t.emoji;
-  newName.value = t.name;
-}
-
-async function createList() {
-  if (!newName.value.trim()) return;
-  isCreating.value = true;
-  try {
-    await listStore.createList(auth.sessionToken!, newName.value.trim(), newEmoji.value);
-    showNewModal.value = false;
-  } finally {
-    isCreating.value = false;
-  }
-}
 
 // ── Remove item ───────────────────────────────────────────────────────────────
 async function removeItem(listId: string, item: ListItem) {
@@ -58,14 +34,13 @@ async function removeItem(listId: string, item: ListItem) {
 
 // ── Place detail panel ────────────────────────────────────────────────────────
 const selectedItem = ref<ListItem | null>(null);
-const selectedItemDetails = ref<PlaceDetails | null>(null);
-const isLoadingItemDetails = ref(false);
+const { placeDetails: selectedItemDetails, isLoadingDetails: isLoadingItemDetails, openCard } = usePlaceDetail();
 
 function listItemToCard(item: ListItem): DiscoveryCard {
   return {
     id: item.fsqId ?? item.title,
     fsqId: item.fsqId,
-    type: item.type as any,
+    type: item.type as DiscoveryCard["type"],
     title: item.title,
     description: "",
     tags: [],
@@ -81,17 +56,7 @@ function listItemToCard(item: ListItem): DiscoveryCard {
 
 async function openItem(item: ListItem) {
   selectedItem.value = item;
-  selectedItemDetails.value = null;
-  if (item.fsqId) {
-    isLoadingItemDetails.value = true;
-    try {
-      selectedItemDetails.value = await tripsApi.getPlaceDetails(item.fsqId);
-    } catch {
-      // ignore
-    } finally {
-      isLoadingItemDetails.value = false;
-    }
-  }
+  await openCard(listItemToCard(item));
 }
 
 // ── Delete list ───────────────────────────────────────────────────────────────
@@ -113,7 +78,7 @@ async function confirmDelete() {
         <h1 class="lists-title">My Lists</h1>
         <p class="lists-sub">Saved places across your travels</p>
       </div>
-      <button v-if="!listStore.isLoading" class="btn-new-list" @click="openNewModal">
+      <button v-if="!listStore.isLoading" class="btn-new-list" @click="showNewModal = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
         </svg>
@@ -138,7 +103,7 @@ async function confirmDelete() {
         Create a list to save places you love — restaurants, landmarks, hotels and more.
         When exploring a city in the trip wizard, save any place directly to a list.
       </p>
-      <button class="btn-new-list btn-new-list--large" @click="openNewModal">
+      <button class="btn-new-list btn-new-list--large" @click="showNewModal = true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
         </svg>
@@ -174,87 +139,24 @@ async function confirmDelete() {
     />
 
     <!-- New list modal -->
-    <Teleport to="body">
-      <Transition name="fade">
-        <div v-if="showNewModal" class="modal-backdrop" @click.self="showNewModal = false">
-          <div class="modal">
-            <button class="modal-close" @click="showNewModal = false">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </button>
+    <NewListModal
+      v-if="showNewModal"
+      @created="showNewModal = false"
+      @cancel="showNewModal = false"
+    />
 
-            <div class="modal-header">
-              <h2 class="modal-title">New list</h2>
-            </div>
-
-            <p class="form-label">Quick pick</p>
-            <div class="templates">
-              <button
-                v-for="t in LIST_TEMPLATES"
-                :key="t.name"
-                class="template-btn"
-                :class="{ 'template-btn--active': newEmoji === t.emoji && newName === t.name }"
-                @click="pickTemplate(t)"
-              >
-                {{ t.emoji }} {{ t.name }}
-              </button>
-            </div>
-
-            <p class="form-label" style="margin-top:12px;">Emoji</p>
-            <div class="emoji-grid">
-              <button
-                v-for="e in LIST_EMOJIS"
-                :key="e"
-                class="emoji-btn"
-                :class="{ 'emoji-btn--active': newEmoji === e }"
-                @click="newEmoji = e"
-              >{{ e }}</button>
-            </div>
-
-            <p class="form-label" style="margin-top:12px;">Name</p>
-            <input
-              v-model="newName"
-              class="name-input"
-              type="text"
-              placeholder="List name…"
-              maxlength="40"
-              @keydown.enter="createList"
-            />
-
-            <div class="modal-actions">
-              <button class="modal-btn modal-btn--cancel" @click="showNewModal = false">Cancel</button>
-              <button
-                class="modal-btn modal-btn--create"
-                :disabled="!newName.trim() || isCreating"
-                @click="createList"
-              >
-                {{ isCreating ? 'Creating…' : 'Create list' }}
-              </button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-
-      <!-- Delete confirmation -->
-      <Transition name="fade">
-        <div v-if="confirmDeleteId" class="modal-backdrop" @click.self="confirmDeleteId = null">
-          <div class="modal">
-            <div class="modal-icon">🗑️</div>
-            <h3 class="modal-title">Delete list?</h3>
-            <p class="modal-body">
-              This will permanently delete
-              <strong>{{ listStore.lists.find(l => l.id === confirmDeleteId)?.emoji }} {{ listStore.lists.find(l => l.id === confirmDeleteId)?.name }}</strong>
-              and all {{ listStore.lists.find(l => l.id === confirmDeleteId)?.items.length }} saved places.
-            </p>
-            <div class="modal-actions">
-              <button class="modal-btn modal-btn--cancel" @click="confirmDeleteId = null">Cancel</button>
-              <button class="modal-btn modal-btn--delete" @click="confirmDelete">Delete</button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- Delete confirmation -->
+    <ConfirmModal
+      v-if="confirmDeleteId"
+      title="Delete list?"
+      confirm-label="Delete"
+      @confirm="confirmDelete"
+      @cancel="confirmDeleteId = null"
+    >
+      This will permanently delete
+      <strong>{{ listStore.lists.find(l => l.id === confirmDeleteId)?.emoji }} {{ listStore.lists.find(l => l.id === confirmDeleteId)?.name }}</strong>
+      and all {{ listStore.lists.find(l => l.id === confirmDeleteId)?.items.length }} saved places.
+    </ConfirmModal>
   </div>
 </template>
 
@@ -382,182 +284,4 @@ async function confirmDelete() {
   gap: 20px;
   align-items: start;
 }
-
-/* ── Modal ── */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-  padding: 20px;
-}
-
-.modal {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 28px 24px 24px;
-  max-width: 400px;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
-  position: relative;
-}
-
-.modal-close {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: 50%;
-  background: var(--bg-input);
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.modal-header { margin-bottom: 4px; }
-
-.modal-icon { font-size: 2rem; text-align: center; }
-
-.modal-title {
-  font-size: 1.1rem;
-  font-weight: 800;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
-  text-align: center;
-}
-
-.modal-body {
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
-  text-align: center;
-}
-
-.form-label {
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-muted);
-}
-
-.templates {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.template-btn {
-  padding: 5px 12px;
-  border: 1px solid var(--border);
-  background: var(--bg-input);
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: border-color var(--transition), color var(--transition), background var(--transition);
-}
-
-.template-btn--active,
-.template-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
-}
-
-.emoji-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.emoji-btn {
-  width: 34px;
-  height: 34px;
-  border: 1.5px solid var(--border);
-  background: var(--bg-input);
-  border-radius: var(--radius-sm);
-  font-size: 1.05rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: border-color var(--transition);
-}
-
-.emoji-btn--active { border-color: var(--accent); background: var(--accent-dim); }
-.emoji-btn:hover { border-color: var(--accent); }
-
-.name-input {
-  width: 100%;
-  padding: 10px 13px;
-  border: 1.5px solid var(--border);
-  background: var(--bg-input);
-  border-radius: var(--radius-sm);
-  font-size: 0.9rem;
-  color: var(--text-primary);
-  outline: none;
-  box-sizing: border-box;
-  transition: border-color var(--transition);
-}
-
-.name-input:focus { border-color: var(--border-focus); }
-.name-input::placeholder { color: var(--text-muted); }
-
-.modal-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 4px;
-}
-
-.modal-btn {
-  flex: 1;
-  padding: 10px 16px;
-  border-radius: var(--radius-sm);
-  font-size: 0.875rem;
-  font-weight: 700;
-  cursor: pointer;
-  transition: background var(--transition), border-color var(--transition);
-}
-
-.modal-btn--cancel {
-  background: transparent;
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-}
-
-.modal-btn--cancel:hover { background: var(--bg-card-hover); }
-
-.modal-btn--create {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-}
-
-.modal-btn--create:hover:not(:disabled) { background: var(--accent-hover); }
-.modal-btn--create:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.modal-btn--delete {
-  background: var(--danger-bg);
-  color: var(--danger);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-}
-
-.modal-btn--delete:hover { background: rgba(239, 68, 68, 0.2); border-color: var(--danger); }
-
-.fade-enter-active, .fade-leave-active { transition: opacity 200ms ease; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

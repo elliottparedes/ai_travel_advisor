@@ -43,7 +43,7 @@ export async function saveTrip(opts: {
 }
 
 export async function fetchCardImages(
-  queries: { id: string; query: string; fsqId?: string }[],
+  queries: { id: string; query: string }[],
 ): Promise<Record<string, string[]>> {
   return await convexClient.action(api.tripActions.fetchCardImages, { queries });
 }
